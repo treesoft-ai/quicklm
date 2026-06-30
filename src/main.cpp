@@ -85,7 +85,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Vocabulary loaded with " << tokenizer.vocab_size() << " tokens." << std::endl;
 
     // 2. Load model config and weights
-    std::cout << "Loading Qwen Model..." << std::endl;
+    std::cout << "Loading Model..." << std::endl;
     auto start_load = std::chrono::high_resolution_clock::now();
     DecoderModel model;
     if (!model.load(model_path)) {

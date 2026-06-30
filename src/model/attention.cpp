@@ -148,14 +148,16 @@ void Qwen3_5Attention::forward(const Tensor& input, Tensor& output, Context& ctx
         }
     }
 
-    // 6. Output gate (attn_output_gate=true): attn_out *= sigmoid(gate).
-    //    gate is the second head_dim dims of each Q head.
-    for (int h = 0; h < num_heads; ++h) {
-        float* out_head = attn_out.data + h * head_dim;
-        float* gate_head = q_t.data + h * q_head_dim + head_dim;  // gate half
-        for (int d = 0; d < head_dim; ++d) {
-            float g = gate_head[d];
-            out_head[d] *= 1.0f / (1.0f + std::exp(-g));  // sigmoid gate
+    // 6. Output gate: present when q_proj emits [query|gate] per head (q_head_dim > head_dim).
+    //    Standard GQA models have q_head_dim == head_dim and skip this entirely.
+    if (q_head_dim > head_dim) {
+        for (int h = 0; h < num_heads; ++h) {
+            float* out_head = attn_out.data + h * head_dim;
+            float* gate_head = q_t.data + h * q_head_dim + head_dim;
+            for (int d = 0; d < head_dim; ++d) {
+                float g = gate_head[d];
+                out_head[d] *= 1.0f / (1.0f + std::exp(-g));
+            }
         }
     }
 

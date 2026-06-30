@@ -22,6 +22,6 @@ struct ModelConfig {
     int linear_head_dim = 128;     // Linear-attention head dimension
     float rms_norm_eps = 1e-6f;
     float rope_theta = 1000000.0f;
-    float partial_rotary_factor = 0.25f;  // Qwen3.5: RoPE applied to only 25% of head_dim
+    float partial_rotary_factor = 1.0f;   // 1.0 = full RoPE (standard); Qwen3.5 overrides to 0.25
     std::vector<std::string> layer_types;
 };
