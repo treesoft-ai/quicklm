@@ -17,6 +17,7 @@ void print_usage() {
               << "  --top_k <value>       Top-k filtering (default: 40, 0 to disable)\n"
               << "  --max_tokens <value>  Maximum output tokens to generate (default: 256)\n"
               << "  --threads <value>     Number of threads (default: hardware threads)\n"
+              << "  --version <value>     QI version (default: 1)\n"
               << "  --raw                 Disable the chat template (plain completion mode)\n"
               << "  --show_ids            Print generated token IDs to stderr (verification)\n"
               << std::endl;
@@ -29,6 +30,7 @@ int main(int argc, char* argv[]) {
     int top_k = 40;
     int max_tokens = 256;
     int num_threads = std::max(1u, std::thread::hardware_concurrency());
+    int qi_version = 1;
     bool raw = false;  // --raw disables the chat template (plain completion mode)
     bool show_ids = false;  // --show_ids prints generated token IDs to stderr (verification)
 
@@ -47,6 +49,8 @@ int main(int argc, char* argv[]) {
             max_tokens = std::stoi(argv[++i]);
         } else if (arg == "--threads" && i + 1 < argc) {
             num_threads = std::stoi(argv[++i]);
+        } else if (arg == "--version" && i + 1 < argc) {
+            qi_version = std::stoi(argv[++i]);
         } else if (arg == "--raw") {
             raw = true;
         } else if (arg == "--show_ids") {
@@ -57,13 +61,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (qi_version != 1) {
+        std::cerr << "Warning: QI version " << qi_version << " is invalid. Only version 1 is supported." << std::endl;
+    }
+
     if (model_path.empty() || prompt.empty()) {
         std::cerr << "Error: --path and --prompt arguments are required." << std::endl;
         print_usage();
         return 1;
     }
 
-    std::cout << "Initializing QuickLM CPU FP32 Inference Engine (" << num_threads << " threads)..." << std::endl;
+    std::cout << "Initializing QI v" << qi_version << " (Quick Inference v" << qi_version << ") with " << num_threads << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
     math::init_thread_pool(num_threads);
 
     // 1. Initialize tokenizer

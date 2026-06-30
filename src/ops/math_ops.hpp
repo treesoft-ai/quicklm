@@ -45,7 +45,7 @@ private:
     bool stop;
 };
 
-// Global math operations for the QuickLM inference engine
+// Global math operations for QI (Quick Inference)
 namespace math {
 
 // Initialize the global thread pool
