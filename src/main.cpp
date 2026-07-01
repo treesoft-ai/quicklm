@@ -20,6 +20,9 @@ void print_usage() {
               << "  --version <value>     QI version (default: 1)\n"
               << "  --raw                 Disable the chat template (plain completion mode)\n"
               << "  --show_ids            Print generated token IDs to stderr (verification)\n"
+              << "  --precision <value>   Weight precision: bf16 (default), int8, or int4\n"
+              << "                        (quantized at load time; the model files on disk\n"
+              << "                        are untouched)\n"
               << std::endl;
 }
 
@@ -33,6 +36,7 @@ int main(int argc, char* argv[]) {
     int qi_version = 1;
     bool raw = false;  // --raw disables the chat template (plain completion mode)
     bool show_ids = false;  // --show_ids prints generated token IDs to stderr (verification)
+    std::string precision = "bf16";  // --precision bf16|int8|int4
 
     // Simple command line parsing
     for (int i = 1; i < argc; ++i) {
@@ -55,6 +59,8 @@ int main(int argc, char* argv[]) {
             raw = true;
         } else if (arg == "--show_ids") {
             show_ids = true;
+        } else if (arg == "--precision" && i + 1 < argc) {
+            precision = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             print_usage();
             return 0;
@@ -67,6 +73,12 @@ int main(int argc, char* argv[]) {
 
     if (model_path.empty() || prompt.empty()) {
         std::cerr << "Error: --path and --prompt arguments are required." << std::endl;
+        print_usage();
+        return 1;
+    }
+
+    if (precision != "bf16" && precision != "int8" && precision != "int4") {
+        std::cerr << "Error: --precision must be 'bf16', 'int8', or 'int4', got '" << precision << "'." << std::endl;
         print_usage();
         return 1;
     }
@@ -88,7 +100,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Loading Model..." << std::endl;
     auto start_load = std::chrono::high_resolution_clock::now();
     DecoderModel model;
-    if (!model.load(model_path)) {
+    if (!model.load(model_path, 2048, precision)) {
         std::cerr << "Error: Failed to load model weights/configuration from: " << model_path << std::endl;
         return 1;
     }

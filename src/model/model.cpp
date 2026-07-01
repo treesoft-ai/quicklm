@@ -11,12 +11,27 @@
 #include <cstring>
 #include <random>
 #include <chrono>
+#include <immintrin.h>
 
 namespace fs = std::filesystem;
 
+// Upcast a row of `n` bf16 values directly into a contiguous FP32 buffer.
+static inline void upcast_bf16_row(const uint16_t* src, float* dst, int n) {
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + i));
+        __m256 f = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(v), 16));
+        _mm256_storeu_ps(dst + i, f);
+    }
+    for (; i < n; ++i) {
+        uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
+        std::memcpy(&dst[i], &bits, sizeof(float));
+    }
+}
+
 // --- DecoderModel Implementation ---
 
-bool DecoderModel::load(const std::string& model_dir, int max_seq_len) {
+bool DecoderModel::load(const std::string& model_dir, int max_seq_len, const std::string& precision) {
     // 1. Parse config.json
     std::string config_path = model_dir + "/config.json";
     std::ifstream config_file(config_path);
@@ -74,9 +89,14 @@ bool DecoderModel::load(const std::string& model_dir, int max_seq_len) {
             std::cerr << "Failed to find any .safetensors files in: " << model_dir << std::endl;
             return false;
         }
+        weights.set_precision(precision == "int8" ? ModelWeights::Precision::Int8
+                              : precision == "int4" ? ModelWeights::Precision::Int4
+                                                     : ModelWeights::Precision::Default);
 
         std::cout << "  [Model] Loading embed_tokens..." << std::endl;
-        embed_tokens = weights.get_tensor(arch->embed_name());
+        // Zero-copy bf16 view (no full-table FP32 upcast at load time); only the
+        // one row looked up per token gets upcast, in forward().
+        embed_tokens = weights.get_tensor_bf16(arch->embed_name());
 
         std::cout << "  [Model] Setting up layers..." << std::endl;
         for (int i = 0; i < config.num_hidden_layers; ++i) {
@@ -89,9 +109,10 @@ bool DecoderModel::load(const std::string& model_dir, int max_seq_len) {
 
         std::cout << "  [Model] Loading lm_head..." << std::endl;
         // lm_head is a matmul operand → load as bf16 to halve the dominant
-        // single-token GEMV bandwidth. embed_tokens stays FP32 for the embedding
-        // lookup. With tied weights these are the same underlying tensor, loaded
-        // in both representations (the bf16 view is zero-copy into the mmap).
+        // single-token GEMV bandwidth. embed_tokens is also bf16 now (zero-copy
+        // gather, upcast per-row in forward()). With tied weights these are the
+        // same underlying tensor, loaded in both representations (both views
+        // are zero-copy into the mmap).
         if (weights.has_tensor(arch->lm_head_name())) {
             lm_head = weights.get_weight(arch->lm_head_name());
         } else {
@@ -118,10 +139,17 @@ void DecoderModel::reset_states() {
 void DecoderModel::forward(int token_id, Tensor& logits, Context& ctx) {
     auto start_fwd = std::chrono::high_resolution_clock::now();
 
-    // Look up input embedding
-    float* embed_ptr = embed_tokens.data + token_id * config.hidden_size;
+    // Look up input embedding. Table is bf16 (zero-copy view; upcast just the one
+    // row we need) unless the checkpoint stores it as F32, in which case
+    // get_tensor_bf16() already fell back to a plain FP32 tensor.
     Tensor hidden_states({config.hidden_size});
-    std::memcpy(hidden_states.data, embed_ptr, config.hidden_size * sizeof(float));
+    if (embed_tokens.is_bf16()) {
+        const uint16_t* embed_ptr = embed_tokens.bf16_data + (size_t)token_id * config.hidden_size;
+        upcast_bf16_row(embed_ptr, hidden_states.data, config.hidden_size);
+    } else {
+        const float* embed_ptr = embed_tokens.data + (size_t)token_id * config.hidden_size;
+        std::memcpy(hidden_states.data, embed_ptr, config.hidden_size * sizeof(float));
+    }
 
     auto start_layers = std::chrono::high_resolution_clock::now();
     // Execute transformer layers

@@ -18,8 +18,12 @@ public:
     DecoderModel() = default;
     ~DecoderModel() = default;
 
-    // Load model configuration and weight tensors from the model directory
-    bool load(const std::string& model_dir, int max_seq_len = 2048);
+    // Load model configuration and weight tensors from the model directory.
+    // `precision` selects the in-RAM storage for matmul weight operands
+    // ("bf16" default, or "int8" to quantize at load time); the on-disk
+    // safetensors files are never modified.
+    bool load(const std::string& model_dir, int max_seq_len = 2048,
+              const std::string& precision = "bf16");
 
     // Reset recurrent/KV cache states for a new prompt
     void reset_states();

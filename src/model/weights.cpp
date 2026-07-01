@@ -57,6 +57,24 @@ Tensor ModelWeights::get_weight(const std::string& name) const {
     if (!loader) {
         throw std::runtime_error("Tensor not found in any safetensors files: " + name);
     }
+    if (precision == Precision::Int8) {
+        // Reads raw BF16/F32 bytes straight from the mmap and quantizes
+        // in-place; never touches the on-disk file, never materializes an
+        // FP32 intermediate.
+        return loader->get_tensor_keep_int8(resolved);
+    }
+    if (precision == Precision::Int4) {
+        return loader->get_tensor_keep_int4(resolved);
+    }
+    return loader->get_tensor_keep_bf16(resolved);
+}
+
+Tensor ModelWeights::get_tensor_bf16(const std::string& name) const {
+    std::string resolved;
+    SafetensorsLoader* loader = find_loader(name, resolved);
+    if (!loader) {
+        throw std::runtime_error("Tensor not found in any safetensors files: " + name);
+    }
     return loader->get_tensor_keep_bf16(resolved);
 }
 

@@ -54,6 +54,20 @@ public:
     // matrices to halve resident size and decode-time memory bandwidth.
     Tensor get_tensor_keep_bf16(const std::string& name);
 
+    // Retrieve a tensor quantized directly to symmetric per-row INT8, reading
+    // raw BF16 or F32 bytes straight from the memory mapping — never
+    // materializes the FP32 intermediate that get_tensor() would produce.
+    // Quantization is AVX2-vectorized and parallelized across rows using the
+    // global thread pool (see math_ops.hpp).
+    Tensor get_tensor_keep_int8(const std::string& name);
+
+    // Retrieve a tensor quantized directly to symmetric per-block INT4
+    // (Q4_0-style, two values packed per byte), reading raw BF16 or F32 bytes
+    // straight from the memory mapping — never materializes the FP32 or INT8
+    // intermediate. Quantization is AVX2-vectorized and parallelized across rows
+    // using the global thread pool (see math_ops.hpp).
+    Tensor get_tensor_keep_int4(const std::string& name);
+
     // Check if a tensor exists
     bool has_tensor(const std::string& name) const;
 

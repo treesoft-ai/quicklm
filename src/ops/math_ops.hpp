@@ -51,6 +51,8 @@ namespace math {
 // Initialize the global thread pool
 void init_thread_pool(size_t num_threads);
 ThreadPool* get_thread_pool();
+// Number of worker threads in the global pool (0 if single-threaded / uninitialized).
+int get_thread_pool_size();
 
 // Profiling: accumulated wall-time spent inside matmul (ms), gated by QUICKLM_PROF.
 double get_matmul_ms();

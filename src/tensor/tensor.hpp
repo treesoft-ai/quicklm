@@ -27,6 +27,39 @@ struct Tensor {
 
     bool is_bf16() const { return bf16_data != nullptr; }
 
+    // Block size for int8 quantization scales (Q8_0-style): one scale per this
+    // many contiguous elements within a row, rather than one scale per row.
+    static constexpr int INT8_BLOCK_SIZE = 32;
+
+    // Optional int8 backing store: symmetric per-block (Q8_0-style) quantization.
+    // For a row of length K, num_blocks = ceil(K / INT8_BLOCK_SIZE); row r's
+    // dequantized value at column k is
+    // `int8_data[r*K+k] * int8_scales[r*num_blocks + k/INT8_BLOCK_SIZE]`.
+    // Mutually exclusive with `data` and `bf16_data` for matmul B operands.
+    const int8_t* int8_data = nullptr;
+    std::shared_ptr<std::vector<int8_t>> int8_owner = nullptr;
+    std::shared_ptr<std::vector<float>> int8_scales = nullptr;
+
+    bool is_int8() const { return int8_data != nullptr; }
+
+    // Block size for int4 quantization scales (Q4_0-style): same block-per-scale
+    // granularity as INT8_BLOCK_SIZE.
+    static constexpr int INT4_BLOCK_SIZE = 32;
+
+    // Optional int4 backing store: symmetric per-block (Q4_0-style) quantization,
+    // two values packed per byte (low nibble = even column, high nibble = odd
+    // column). For a row of length K, num_blocks = ceil(K / INT4_BLOCK_SIZE); row
+    // r's dequantized value at column k is
+    // `(nibble - 8) * int4_scales[r*num_blocks + k/INT4_BLOCK_SIZE]`, where
+    // `nibble = (int4_data[r*K/2 + k/2] >> ((k%2)*4)) & 0xF` (unsigned, range
+    // [0,15], biased by +8 from the signed quantized value in [-8,7]). Mutually
+    // exclusive with `data`, `bf16_data`, and `int8_data` for matmul B operands.
+    const uint8_t* int4_data = nullptr;
+    std::shared_ptr<std::vector<uint8_t>> int4_owner = nullptr;
+    std::shared_ptr<std::vector<float>> int4_scales = nullptr;
+
+    bool is_int4() const { return int4_data != nullptr; }
+
     Tensor() = default;
 
     // Construct a tensor that owns its memory (zero-initialized)
