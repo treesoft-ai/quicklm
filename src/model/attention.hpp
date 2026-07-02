@@ -66,6 +66,14 @@ public:
     void reset_states() override;
     void prefetch_weights() const override;
 
+    // Speculative decoding reject-path support (design doc §9): conv_state and
+    // recurrent_state are dense accumulators mutated in place every step, so a
+    // rejected draft token's contribution can't be undone — save both before a
+    // draft round, copy back on partial reject. Qwen3_5Attention needs no
+    // equivalent (position-indexed K/V cache; stale speculative rows are inert).
+    void snapshot_states() override;
+    void restore_states() override;
+
 private:
     // Batched/chunked path used when ctx.seq_len > 1. The projections batch
     // across rows (weight read once); the causal conv1d and recurrent
@@ -93,4 +101,10 @@ private:
 
     // Recurrent State: [num_heads, head_dim, head_dim]
     Tensor recurrent_state;
+
+    // Snapshot buffers for the speculative-decoding reject path (§9). Same
+    // shapes as conv_state/recurrent_state; allocated lazily on the first
+    // snapshot_states() call so non-speculative runs pay nothing.
+    Tensor conv_state_snapshot;
+    Tensor recurrent_state_snapshot;
 };

@@ -24,8 +24,10 @@ set(SOURCES
     src/model/model.cpp
     src/arch/registry.cpp
     src/arch/qwen3_5.cpp
+    src/arch/generic_transformer.cpp
     src/main.cpp
     src/model/attention.cpp
+    src/model/speculative.cpp
 )
 
 # Header files
@@ -41,9 +43,11 @@ set(HEADERS
     src/model/modules.hpp
     src/model/model.hpp
     src/model/attention.hpp
+    src/model/speculative.hpp
     src/arch/architecture.hpp
     src/arch/registry.hpp
     src/arch/qwen3_5.hpp
+    src/arch/generic_transformer.hpp
 )
 
 add_executable(quicklm ${SOURCES} ${HEADERS})

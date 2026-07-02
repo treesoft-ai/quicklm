@@ -28,6 +28,15 @@ public:
     // Reset recurrent/KV cache states for a new prompt
     void reset_states();
 
+    // Snapshot/restore every layer's mutable recurrent state (in practice the
+    // Qwen3_5GatedDeltaNet layers' conv_state/recurrent_state; attention K/V
+    // is position-indexed and needs neither — see modules.hpp). Used by the
+    // speculative-decoding reject path: snapshot before drafting a round,
+    // restore (then replay the accepted prefix) when the target rejects part
+    // of the draft. One snapshot slot per layer, overwritten on each call.
+    void snapshot_states();
+    void restore_states();
+
     // Gate the QI --optimize=prefetch method: warm layer i+1's first weight
     // matrix while layer i is still computing. Lossless (same math, pure
     // latency hiding); off by default until requested via --optimize.

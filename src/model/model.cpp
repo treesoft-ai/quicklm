@@ -136,6 +136,18 @@ void DecoderModel::reset_states() {
     }
 }
 
+void DecoderModel::snapshot_states() {
+    for (auto& layer : layers) {
+        layer->snapshot_states();
+    }
+}
+
+void DecoderModel::restore_states() {
+    for (auto& layer : layers) {
+        layer->restore_states();
+    }
+}
+
 void DecoderModel::forward(int token_id, Tensor& logits, Context& ctx) {
     auto start_fwd = std::chrono::high_resolution_clock::now();
 

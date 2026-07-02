@@ -73,6 +73,21 @@ void Tokenizer::build_byte_unicode_maps() {
     }
 }
 
+// FNV-1a over a byte buffer, continuing from a running hash. Seed with
+// FNV_OFFSET_BASIS for the first chunk. Cheap, dependency-free, and collision
+// resistance is irrelevant here: the fingerprint guards against accidentally
+// pairing two different tokenizers, not against an adversary.
+static uint64_t fnv1a_accumulate(uint64_t hash, const std::string& bytes) {
+    constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+    for (unsigned char c : bytes) {
+        hash ^= c;
+        hash *= FNV_PRIME;
+    }
+    return hash;
+}
+
+static constexpr uint64_t FNV_OFFSET_BASIS = 14695981039346656037ULL;
+
 // --- Tokenizer Implementation ---
 
 bool Tokenizer::load(const std::string& model_dir) {
@@ -87,6 +102,9 @@ bool Tokenizer::load(const std::string& model_dir) {
     std::stringstream buffer;
     buffer << json_file.rdbuf();
     json_file.close();
+
+    // Fingerprint everything this function reads off disk (see tokenizer.hpp).
+    fingerprint_hash = fnv1a_accumulate(FNV_OFFSET_BASIS, buffer.str());
 
     try {
         JsonValue root = JsonParser::parse(buffer.str());
@@ -139,17 +157,22 @@ bool Tokenizer::load(const std::string& model_dir) {
     if (bpe_ranks.empty()) {
         std::ifstream merges_file(model_dir + "/merges.txt", std::ios::binary);
         if (merges_file.is_open()) {
+            // Slurp once so the fingerprint covers the exact bytes parsed below.
+            std::stringstream merges_buf;
+            merges_buf << merges_file.rdbuf();
+            merges_file.close();
+            fingerprint_hash = fnv1a_accumulate(fingerprint_hash, merges_buf.str());
+
             std::string line;
             int rank = 0;
             bool first = true;
-            while (std::getline(merges_file, line)) {
+            while (std::getline(merges_buf, line)) {
                 if (!line.empty() && line.back() == '\r') line.pop_back();
                 if (line.empty()) continue;
                 if (first && line[0] == '#') { first = false; continue; } // version header
                 first = false;
                 bpe_ranks[line] = rank++;
             }
-            merges_file.close();
         }
     }
 

@@ -737,6 +737,30 @@ void Qwen3_5GatedDeltaNet::reset_states() {
     std::memset(recurrent_state.data, 0, recurrent_state.size() * sizeof(float));
 }
 
+void Qwen3_5GatedDeltaNet::snapshot_states() {
+    // Lazy allocation: non-speculative runs never call this, so they never pay
+    // for the buffers (recurrent_state is the expensive one: dense, per-head).
+    if (conv_state_snapshot.size() == 0) {
+        conv_state_snapshot = Tensor(conv_state.shape);
+        recurrent_state_snapshot = Tensor(recurrent_state.shape);
+    }
+    std::memcpy(conv_state_snapshot.data, conv_state.data,
+                conv_state.size() * sizeof(float));
+    std::memcpy(recurrent_state_snapshot.data, recurrent_state.data,
+                recurrent_state.size() * sizeof(float));
+}
+
+void Qwen3_5GatedDeltaNet::restore_states() {
+    if (conv_state_snapshot.size() == 0) {
+        throw std::runtime_error(
+            "Qwen3_5GatedDeltaNet::restore_states() called before any snapshot_states()");
+    }
+    std::memcpy(conv_state.data, conv_state_snapshot.data,
+                conv_state.size() * sizeof(float));
+    std::memcpy(recurrent_state.data, recurrent_state_snapshot.data,
+                recurrent_state.size() * sizeof(float));
+}
+
 void Qwen3_5GatedDeltaNet::prefetch_weights() const {
     // in_proj_qkv is the largest and first-read projection (z/b/a follow under
     // the same matmul_batched barrier but are much smaller).

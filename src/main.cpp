@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "speculative.hpp"
 #include "tokenizer.hpp"
 #include "chat_template.hpp"
 #include "registry.hpp"
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <sstream>
 #include <set>
 
@@ -22,11 +24,17 @@ void print_usage() {
               << "  --max_tokens <value>  Maximum output tokens to generate per turn (default: 256)\n"
               << "  --threads <value>     Number of threads (default: hardware threads)\n"
               << "  --optimize <list>     Comma-separated optimization methods (default: speculative)\n"
-              << "                        [PLACEHOLDER except 'prefetch'/'fusion'/'kv-reuse': the\n"
-              << "                         others are reserved for future use and do not currently\n"
-              << "                         affect inference]\n"
+              << "                        [PLACEHOLDER except 'prefetch'/'fusion'/'kv-reuse'/\n"
+              << "                         'speculative': the others are reserved for future use\n"
+              << "                         and do not currently affect inference]\n"
               << "                        Speculation & decoding:\n"
-              << "                          speculative    Speculative decoding (needs --draft-model)\n"
+              << "                          speculative    Speculative decoding: draft --draft-tokens\n"
+              << "                                         tokens on a cheap draft model, verify them\n"
+              << "                                         in one batched target pass, keep the\n"
+              << "                                         accepted prefix. Greedy (--temp 0) only;\n"
+              << "                                         lossless (token-for-token identical to\n"
+              << "                                         non-speculative greedy decode). With\n"
+              << "                                         --temp > 0 it is skipped with a notice.\n"
               << "                        Memory / KV:\n"
               << "                          kv-reuse       Skip recomputing forward() for turns 2+ of\n"
               << "                                         a session whose token prefix is already in\n"
@@ -56,7 +64,19 @@ void print_usage() {
               << "  --show_ids            Print generated token IDs to stderr per turn (verification)\n"
               << "  --precision <value>   Weight precision: bf16 (default), int8, or int4\n"
               << "                        (quantized at load time; the model files on disk\n"
-              << "                        are untouched)\n\n"
+              << "                        are untouched)\n"
+              << "  --draft-model <dir>   Checkpoint dir for the speculative draft model\n"
+              << "                        (default: same as --path, i.e. self-speculative —\n"
+              << "                        the same checkpoint loaded again at --draft-precision).\n"
+              << "                        An independent draft model must have a tokenizer\n"
+              << "                        byte-identical to the target's; mismatch is a hard\n"
+              << "                        error, never silent fallback. Only used with\n"
+              << "                        --optimize speculative.\n"
+              << "  --draft-precision <v> Precision to load the draft model at: bf16|int8|int4\n"
+              << "                        (default: int4; same set --precision accepts). Only\n"
+              << "                        used with --optimize speculative.\n"
+              << "  --draft-tokens <K>    Tokens to draft per round before verifying (default: 4).\n"
+              << "                        Only used with --optimize speculative.\n\n"
               << "Multi-turn: a single --prompt may contain several turns of the SAME conversation,\n"
               << "delimited by the literal 3-character sequence \\np (backslash, n, p), e.g.\n"
               << "  --prompt \"Hey\\npHow are you?\"\n"
@@ -97,6 +117,9 @@ int main(int argc, char* argv[]) {
     bool show_ids = false;  // --show_ids prints generated token IDs to stderr (verification)
     bool interactive = false;  // --interactive reads further turns from stdin
     std::string precision = "bf16";  // --precision bf16|int8|int4
+    std::string draft_model_path;    // --draft-model; empty -> same as --path (self-speculative)
+    std::string draft_precision = "int4";  // --draft-precision bf16|int8|int4
+    int draft_tokens = 4;            // --draft-tokens; K drafted per verify round
 
     // Simple command line parsing
     for (int i = 1; i < argc; ++i) {
@@ -123,6 +146,12 @@ int main(int argc, char* argv[]) {
             interactive = true;
         } else if (arg == "--precision" && i + 1 < argc) {
             precision = argv[++i];
+        } else if (arg == "--draft-model" && i + 1 < argc) {
+            draft_model_path = argv[++i];
+        } else if (arg == "--draft-precision" && i + 1 < argc) {
+            draft_precision = argv[++i];
+        } else if (arg == "--draft-tokens" && i + 1 < argc) {
+            draft_tokens = std::stoi(argv[++i]);
         } else if (arg == "--help" || arg == "-h") {
             print_usage();
             return 0;
@@ -172,16 +201,43 @@ int main(int argc, char* argv[]) {
         print_usage();
         return 1;
     }
+    if (draft_precision != "bf16" && draft_precision != "int8" && draft_precision != "int4") {
+        std::cerr << "Error: --draft-precision must be 'bf16', 'int8', or 'int4', got '"
+                  << draft_precision << "'." << std::endl;
+        print_usage();
+        return 1;
+    }
+    if (draft_tokens < 1) {
+        std::cerr << "Error: --draft-tokens must be >= 1, got " << draft_tokens << "." << std::endl;
+        print_usage();
+        return 1;
+    }
 
     bool kv_reuse_enabled =
         std::find(optimizations.begin(), optimizations.end(), "kv-reuse") != optimizations.end();
+
+    // Speculative decoding is greedy-only in this first cut (see
+    // others/speculative_decoding_design.md §7): with --temp 0 it is provably
+    // token-for-token identical to non-speculative greedy decode. Proper
+    // distribution-preserving rejection sampling for temp > 0 is a separate
+    // follow-up, so rather than silently changing the output distribution,
+    // temp > 0 skips speculation with a notice ('speculative' is also the
+    // --optimize default, so a hard error here would break plain runs).
+    bool speculative_enabled =
+        std::find(optimizations.begin(), optimizations.end(), "speculative") != optimizations.end();
+    if (speculative_enabled && temp > 0.0f) {
+        std::cout << "Note: --optimize speculative is greedy-only for now and --temp is "
+                  << temp << " (> 0); decoding normally. Use --temp 0 to enable it."
+                  << std::endl;
+        speculative_enabled = false;
+    }
 
     std::cout << "Initializing QI (Quick Inference) with optimizations: ";
     for (size_t i = 0; i < optimizations.size(); ++i) {
         if (i > 0) std::cout << ", ";
         std::cout << optimizations[i];
     }
-    std::cout << " (all except 'prefetch'/'fusion'/'kv-reuse' are placeholders) using " << num_threads
+    std::cout << " (all except 'prefetch'/'fusion'/'kv-reuse'/'speculative' are placeholders) using " << num_threads
               << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
     math::init_thread_pool(num_threads);
 
@@ -211,6 +267,48 @@ int main(int argc, char* argv[]) {
     auto end_load = std::chrono::high_resolution_clock::now();
     std::chrono::duration<float> load_duration = end_load - start_load;
     std::cout << "Model loaded successfully in " << load_duration.count() << " seconds." << std::endl;
+
+    // Speculative decoding: load the draft model. Default is self-speculative
+    // (design doc §3.1): the SAME checkpoint loaded a second time at
+    // --draft-precision (int4 by default), which needs no compatibility check
+    // because both instances read the same tokenizer file. An independent
+    // --draft-model (§3.2/§10) is gated behind a byte-level tokenizer
+    // fingerprint comparison: same vocab SIZE is not sufficient (same size
+    // doesn't mean same ID->token mapping), so any mismatch is a hard error —
+    // a draft proposing IDs from a different vocabulary would verify against
+    // the wrong tokens and produce silently wrong output.
+    std::unique_ptr<DecoderModel> draft_model;
+    if (speculative_enabled) {
+        bool self_speculative = draft_model_path.empty() || draft_model_path == model_path;
+        std::string draft_dir = self_speculative ? model_path : draft_model_path;
+        if (!self_speculative) {
+            Tokenizer draft_tokenizer;
+            if (!draft_tokenizer.load(draft_dir)) {
+                std::cerr << "Error: Failed to load draft model tokenizer from: " << draft_dir
+                          << std::endl;
+                return 1;
+            }
+            if (draft_tokenizer.fingerprint() != tokenizer.fingerprint()) {
+                std::cerr << "Error: draft model tokenizer (" << draft_dir
+                          << ") differs from target's (" << model_path
+                          << "); refusing to run speculative decoding with mismatched "
+                          << "vocabularies. No fallback — fix --draft-model or drop it "
+                          << "to use self-speculative mode." << std::endl;
+                return 1;
+            }
+        }
+        std::cout << "Loading draft model (" << (self_speculative ? "self-speculative, " : "")
+                  << draft_precision << ") from: " << draft_dir << std::endl;
+        auto start_draft = std::chrono::high_resolution_clock::now();
+        draft_model = std::make_unique<DecoderModel>();
+        if (!draft_model->load(draft_dir, max_seq_len, draft_precision)) {
+            std::cerr << "Error: Failed to load draft model from: " << draft_dir << std::endl;
+            return 1;
+        }
+        std::chrono::duration<float> draft_load =
+            std::chrono::high_resolution_clock::now() - start_draft;
+        std::cout << "Draft model loaded in " << draft_load.count() << " seconds." << std::endl;
+    }
 
     // Diagnostic (opt-in via env var, like QUICKLM_PROF): verify
     // DecoderModel::forward_batch() is bit-identical to calling forward()
@@ -278,11 +376,28 @@ int main(int argc, char* argv[]) {
     if (!prompt.empty()) pending_turns = split_turns(prompt);
 
     // Session state, persists across turns so kv-reuse has something to reuse.
+    // The draft model (when present) is kept in lockstep with the target
+    // everywhere: same resets, same prefill, and generate_turn() itself
+    // advances both through every committed token — so cached_ids describes
+    // BOTH models' live state at all times.
     model.reset_states();
+    if (draft_model) draft_model->reset_states();
     std::vector<ChatMessage> messages;   // conversation history (non-raw only)
     std::vector<int> cached_ids;         // tokens whose KV/state is currently live in the caches
     Context ctx;
     Tensor logits({model.get_config().vocab_size});
+
+    std::unique_ptr<SpeculativeDecoder> spec_decoder;
+    if (draft_model) {
+        try {
+            spec_decoder = std::make_unique<SpeculativeDecoder>(
+                model, *draft_model, draft_tokens, max_seq_len,
+                tokenizer.eos_token_id(), tokenizer.im_end_token_id());
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+            return 1;
+        }
+    }
 
     int turn_num = 0;
     bool fatal_error = false;
@@ -311,6 +426,7 @@ int main(int argc, char* argv[]) {
             // turn's. Reset before every raw turn.
             if (!cached_ids.empty()) {
                 model.reset_states();
+                if (draft_model) draft_model->reset_states();
                 cached_ids.clear();
             }
             full_prompt = turn_text;
@@ -358,6 +474,7 @@ int main(int argc, char* argv[]) {
                 // to correspond to a prefix of new_ids, so the only correct
                 // recovery is a full reset + replay from scratch.
                 model.reset_states();
+                if (draft_model) draft_model->reset_states();
                 cached_ids.clear();
             }
         }
@@ -406,6 +523,15 @@ int main(int argc, char* argv[]) {
                 }
                 Tensor prefill_logits({prefill_count, model.get_config().vocab_size});
                 model.forward_batch(prefill_ids, prefill_logits, ctx);
+                if (draft_model) {
+                    // Keep the draft model's state in lockstep: it must have
+                    // consumed the same prompt before it can draft continuations
+                    // of it. Cheap relative to the target's pass (int4 draft).
+                    Context draft_ctx;
+                    draft_ctx.pos = static_cast<int>(cached_ids.size());
+                    Tensor draft_prefill_logits({prefill_count, draft_model->get_config().vocab_size});
+                    draft_model->forward_batch(prefill_ids, draft_prefill_logits, draft_ctx);
+                }
                 cached_ids.insert(cached_ids.end(), prefill_ids.begin(), prefill_ids.end());
             }
             if (kv_reuse_enabled) {
@@ -418,22 +544,50 @@ int main(int argc, char* argv[]) {
             std::chrono::duration<float> prefill_duration = after_prefill - start_gen;
             std::cout << "  Prefill: " << prefill_duration.count() << " seconds" << std::endl;
 
-            int next_token = new_ids.back();
-            for (int i = 0; i < max_tokens; ++i) {
-                do_forward(next_token);
-                next_token = model.sample(logits, temp, top_k);
-                if (next_token == tokenizer.eos_token_id() ||
-                    next_token == tokenizer.im_end_token_id()) {
-                    break;
+            if (spec_decoder) {
+                // Speculative decode loop (greedy-only; --temp > 0 disabled
+                // speculation up front). Streams committed tokens as each
+                // round resolves; on return, cached_ids exactly matches both
+                // models' consumed state, same invariant the normal loop
+                // maintains via do_forward().
+                SpeculativeStats st = spec_decoder->generate_turn(
+                    cached_ids, new_ids.back(), max_tokens, [&](int tok) {
+                        generated_ids.push_back(tok);
+                        std::string token_str = tokenizer.decode({tok});
+                        assistant_text += token_str;
+                        std::cout << token_str;
+                        std::cout.flush();
+                        generated_count++;
+                    });
+                std::cout << std::endl;
+                // Acceptance-rate instrumentation (design doc §11): the whole
+                // speedup is governed by this number, so report it per turn
+                // instead of treating the draft as a black box.
+                float rate = st.drafted > 0
+                                 ? 100.0f * st.draft_accepted / st.drafted
+                                 : 0.0f;
+                std::cout << "  [speculative] " << st.rounds << " rounds, accepted "
+                          << st.draft_accepted << "/" << st.drafted << " drafted tokens ("
+                          << rate << "%), " << st.rejections << " rejection"
+                          << (st.rejections == 1 ? "" : "s") << std::endl;
+            } else {
+                int next_token = new_ids.back();
+                for (int i = 0; i < max_tokens; ++i) {
+                    do_forward(next_token);
+                    next_token = model.sample(logits, temp, top_k);
+                    if (next_token == tokenizer.eos_token_id() ||
+                        next_token == tokenizer.im_end_token_id()) {
+                        break;
+                    }
+                    generated_ids.push_back(next_token);
+                    std::string token_str = tokenizer.decode({next_token});
+                    assistant_text += token_str;
+                    std::cout << token_str;
+                    std::cout.flush();
+                    generated_count++;
                 }
-                generated_ids.push_back(next_token);
-                std::string token_str = tokenizer.decode({next_token});
-                assistant_text += token_str;
-                std::cout << token_str;
-                std::cout.flush();
-                generated_count++;
+                std::cout << std::endl;
             }
-            std::cout << std::endl;
 
             // Exact, decode-independent fingerprint of this turn's greedy
             // output. Used to verify kv-reuse leaves responses identical.

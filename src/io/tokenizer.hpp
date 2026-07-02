@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <cstdint>
 
 class Tokenizer {
 public:
@@ -27,6 +28,15 @@ public:
     int eos_token_id() const { return eos_id; }
     int im_end_token_id() const { return im_end_id; }
 
+    // FNV-1a hash over the raw bytes of every tokenizer artifact load() read
+    // (tokenizer.json, plus merges.txt when the fallback path was taken).
+    // Two tokenizers with different fingerprints must be assumed to map IDs
+    // to different tokens. Used by speculative decoding's independent-draft-
+    // model mode to hard-reject a draft whose vocabulary differs from the
+    // target's (design doc §10): "same vocab size" is NOT sufficient, hence a
+    // content hash. 0 until load() has run.
+    uint64_t fingerprint() const { return fingerprint_hash; }
+
 private:
     // Core vocabulary mapping: byte-level token string -> ID
     std::unordered_map<std::string, int> token_to_id;
@@ -47,6 +57,8 @@ private:
     int bos_id = -1;
     int eos_id = -1;
     int im_end_id = -1;
+
+    uint64_t fingerprint_hash = 0;
 
     void build_byte_unicode_maps();
 

@@ -26,6 +26,18 @@ public:
     virtual void forward(const Tensor& input, Tensor& output, Context& ctx) = 0;
     virtual void reset_states() {}
 
+    // Snapshot/restore of mutable recurrent state, for speculative decoding's
+    // reject path (see others/speculative_decoding_design.md §9). Only modules
+    // whose state is a dense in-place accumulator (Qwen3_5GatedDeltaNet's
+    // conv_state/recurrent_state) need to implement these: a rejected draft
+    // token's contribution can't be subtracted back out of such state, so it
+    // must be saved before drafting and restored on partial reject. Attention's
+    // K/V cache deliberately stays a no-op — it's indexed by absolute position,
+    // so speculative rows past the committed length are simply never read
+    // again (same reasoning that made kv-reuse append-only for free).
+    virtual void snapshot_states() {}
+    virtual void restore_states() {}
+
     // Issue prefetch hints for this module's first-touched weight tensor(s).
     // Called on the NEXT layer while the current layer is still computing, so
     // the hardware has a full layer's worth of compute time to pull the next
@@ -216,6 +228,17 @@ public:
         if (attn) attn->reset_states();
         if (norm2) norm2->reset_states();
         if (mlp) mlp->reset_states();
+    }
+
+    // Only attention-family modules carry recurrent state; norms and MLPs are
+    // stateless (their overrides are the IModule no-ops anyway, but skip the
+    // virtual calls entirely).
+    void snapshot_states() override {
+        if (attn) attn->snapshot_states();
+    }
+
+    void restore_states() override {
+        if (attn) attn->restore_states();
     }
 
     // Fan out to the sub-module that will actually be touched first
