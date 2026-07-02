@@ -198,6 +198,53 @@ void DecoderModel::forward(int token_id, Tensor& logits, Context& ctx) {
     }
 }
 
+void DecoderModel::forward_batch(const std::vector<int>& token_ids, Tensor& logits_out, Context& ctx) {
+    int K = static_cast<int>(token_ids.size());
+    if (K == 0) return;
+    if (K == 1) {
+        // Degenerate case: identical to forward() with seq_len left at 1.
+        forward(token_ids[0], logits_out, ctx);
+        return;
+    }
+
+    // Gather K embedding rows into [K, hidden_size].
+    Tensor hidden_states({K, config.hidden_size});
+    for (int t = 0; t < K; ++t) {
+        float* dst = hidden_states.data + (size_t)t * config.hidden_size;
+        if (embed_tokens.is_bf16()) {
+            const uint16_t* embed_ptr = embed_tokens.bf16_data + (size_t)token_ids[t] * config.hidden_size;
+            upcast_bf16_row(embed_ptr, dst, config.hidden_size);
+        } else {
+            const float* embed_ptr = embed_tokens.data + (size_t)token_ids[t] * config.hidden_size;
+            std::memcpy(dst, embed_ptr, config.hidden_size * sizeof(float));
+        }
+    }
+
+    // ctx.pos stays fixed at the chunk's starting position for every layer
+    // (each layer maps row r to absolute position ctx.pos + r itself, same
+    // convention as the single-token path where ctx.pos is the one position
+    // being processed); ctx.seq_len tells each layer this is a K-row chunk.
+    ctx.seq_len = K;
+
+    Tensor next_hidden_states({K, config.hidden_size});
+    for (size_t i = 0; i < layers.size(); ++i) {
+        if (prefetch_enabled && i + 1 < layers.size()) {
+            layers[i + 1]->prefetch_weights();
+        }
+        layers[i]->forward(hidden_states, next_hidden_states, ctx);
+        std::swap(hidden_states.data, next_hidden_states.data);
+        std::swap(hidden_states.data_owner, next_hidden_states.data_owner);
+    }
+
+    Tensor normalized_states({K, config.hidden_size});
+    final_norm.forward(hidden_states, normalized_states, ctx);
+
+    // Compute vocabulary logits for all K rows in one batched matmul call.
+    math::matmul(normalized_states, lm_head, logits_out, true);
+
+    ctx.seq_len = 1;  // restore the default so later single-token forward() calls are unaffected
+}
+
 int DecoderModel::sample(const Tensor& logits, float temperature, int top_k) {
     int vocab_size = logits.shape.back();
 

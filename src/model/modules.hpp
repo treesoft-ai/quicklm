@@ -6,7 +6,14 @@
 #include <string>
 #include <vector>
 
-// Context holds runtime state during text generation
+// Context holds runtime state during text generation.
+// `pos` is the absolute sequence position of the FIRST token in this
+// forward() call. `seq_len` is how many new positions this call covers:
+// 1 for the normal single-token path (DecoderModel::forward), >1 for a
+// batched/chunked call (DecoderModel::forward_batch) where `input`/`output`
+// are [seq_len, hidden_size] instead of [hidden_size]. Attention/DeltaNet
+// modules use both together to know which absolute positions rows
+// 0..seq_len-1 correspond to (pos, pos+1, ..., pos+seq_len-1).
 struct Context {
     int pos = 0;
     int seq_len = 1;

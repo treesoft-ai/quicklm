@@ -39,6 +39,11 @@ void Qwen3_5Attention::init(
 }
 
 void Qwen3_5Attention::forward(const Tensor& input, Tensor& output, Context& ctx) {
+    if (ctx.seq_len > 1) {
+        forward_chunk(input, output, ctx);
+        return;
+    }
+
     // input is shape [hidden_size]
     // q_proj output per head = [query(head_dim) | gate(head_dim)] (query first, gate second)
 
@@ -166,6 +171,165 @@ void Qwen3_5Attention::forward(const Tensor& input, Tensor& output, Context& ctx
     math::matmul(attn_out_flat, o_proj, output, true);
 }
 
+// Batched/chunked path: input/output are [seq_len, hidden_size], covering
+// absolute positions ctx.pos .. ctx.pos+ctx.seq_len-1. Used to verify a whole
+// speculative-decoding draft chunk against the target model in one pass
+// instead of one forward() call per drafted token (see QI_roadmap.md).
+//
+// This computes EXACTLY the same thing as calling the single-position path
+// above once per row, in row order: every reduction (QK-norm, softmax,
+// output projection) still happens within one row's data via the identical
+// per-row code, so results are bit-identical to the sequential path, not
+// just numerically close. The only thing batching changes is that q/k/v/o
+// projections now read each weight matrix once for all seq_len rows instead
+// of once per row (matmul() already supports M>1 rows for this).
+void Qwen3_5Attention::forward_chunk(const Tensor& input, Tensor& output, Context& ctx) {
+    int K = ctx.seq_len;
+    int base_pos = ctx.pos;
+
+    // 1. QKV projections for all K rows in one batched matmul call each
+    //    (weight matrix read once, applied to K activation rows).
+    Tensor q_t({K, num_heads, q_head_dim});
+    Tensor k_t({K, num_kv_heads, head_dim});
+    Tensor v_t({K, num_kv_heads, head_dim});
+    math::matmul(input, q_proj, q_t, true);
+    math::matmul(input, k_proj, k_t, true);
+    math::matmul(input, v_proj, v_t, true);
+
+    int q_row_size = num_heads * q_head_dim;
+    int kv_row_size = num_kv_heads * head_dim;
+
+    // 2-3. Bias, QK-norm, and RoPE are all per-row/per-head operations with
+    // no cross-row reduction, so each row is processed with the exact same
+    // per-row code the single-position path uses, just looped over rows.
+    for (int r = 0; r < K; ++r) {
+        int pos = base_pos + r;
+        float* q_row = q_t.data + (size_t)r * q_row_size;
+        float* k_row = k_t.data + (size_t)r * kv_row_size;
+        float* v_row = v_t.data + (size_t)r * kv_row_size;
+
+        if (q_bias.data) {
+            Tensor q_row_view({q_row_size}, q_row);
+            math::elementwise_add(q_row_view, q_bias);
+        }
+        if (k_bias.data) {
+            Tensor k_row_view({kv_row_size}, k_row);
+            math::elementwise_add(k_row_view, k_bias);
+        }
+        if (v_bias.data) {
+            Tensor v_row_view({kv_row_size}, v_row);
+            math::elementwise_add(v_row_view, v_bias);
+        }
+
+        if (q_norm.data) {
+            for (int h = 0; h < num_heads; ++h) {
+                float* q_head = q_row + h * q_head_dim;
+                float ss = 0.0f;
+                for (int d = 0; d < head_dim; ++d) ss += q_head[d] * q_head[d];
+                float scale = 1.0f / std::sqrt((ss / head_dim) + 1e-6f);
+                for (int d = 0; d < head_dim; ++d) q_head[d] = q_head[d] * scale * (1.0f + q_norm.data[d]);
+            }
+        }
+        if (k_norm.data) {
+            for (int h = 0; h < num_kv_heads; ++h) {
+                float* k_head = k_row + h * head_dim;
+                float ss = 0.0f;
+                for (int d = 0; d < head_dim; ++d) ss += k_head[d] * k_head[d];
+                float scale = 1.0f / std::sqrt((ss / head_dim) + 1e-6f);
+                for (int d = 0; d < head_dim; ++d) k_head[d] = k_head[d] * scale * (1.0f + k_norm.data[d]);
+            }
+        }
+
+        Tensor k_row_view({num_kv_heads, head_dim}, k_row);
+        math::apply_rope_neox(k_row_view, pos, rope_theta, head_dim, rotary_dim);
+        for (int h = 0; h < num_heads; ++h) {
+            Tensor q_head_view({1, head_dim}, q_row + h * q_head_dim);
+            math::apply_rope_neox(q_head_view, pos, rope_theta, head_dim, rotary_dim);
+        }
+
+        // 4. Write this row's K/V into the cache. Every row is written BEFORE
+        // any row's attention output is computed below, so row r's attention
+        // sees positions 0..base_pos+r including earlier rows of this same
+        // chunk — identical to what the sequential single-position path
+        // would have in cache by the time it reached position base_pos+r.
+        if (pos >= k_cache.shape[0]) {
+            throw std::runtime_error("KV cache index out of bounds: pos = " + std::to_string(pos) +
+                                     ", max_seq_len = " + std::to_string(k_cache.shape[0]));
+        }
+        std::memcpy(k_cache.data + (size_t)pos * kv_row_size, k_row, kv_row_size * sizeof(float));
+        std::memcpy(v_cache.data + (size_t)pos * kv_row_size, v_row, kv_row_size * sizeof(float));
+    }
+
+    // 5. Grouped-Query Attention, per row, per head — identical math/loop
+    // structure to the single-position path, just with pos = base_pos + r.
+    Tensor attn_out({K, num_heads, head_dim});
+    int group_size = num_heads / num_kv_heads;
+    float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    for (int r = 0; r < K; ++r) {
+        int pos = base_pos + r;
+        float* q_row = q_t.data + (size_t)r * q_row_size;
+        float* out_row = attn_out.data + (size_t)r * num_heads * head_dim;
+
+        for (int h = 0; h < num_heads; ++h) {
+            int kv_h = h / group_size;
+            float* q_head = q_row + h * q_head_dim;
+            float* out_head = out_row + h * head_dim;
+
+            std::vector<float> scores(pos + 1, 0.0f);
+            for (int p = 0; p <= pos; ++p) {
+                float* k_cached = k_cache.data + (size_t)p * kv_row_size + kv_h * head_dim;
+                float sum = 0.0f;
+                for (int d = 0; d < head_dim; ++d) {
+                    sum += q_head[d] * k_cached[d];
+                }
+                scores[p] = sum * scale;
+            }
+
+            float max_score = scores[0];
+            for (int p = 1; p <= pos; ++p) {
+                if (scores[p] > max_score) max_score = scores[p];
+            }
+            float exp_sum = 0.0f;
+            for (int p = 0; p <= pos; ++p) {
+                scores[p] = std::exp(scores[p] - max_score);
+                exp_sum += scores[p];
+            }
+            for (int p = 0; p <= pos; ++p) {
+                scores[p] /= exp_sum;
+            }
+
+            std::memset(out_head, 0, head_dim * sizeof(float));
+            for (int p = 0; p <= pos; ++p) {
+                float* v_cached = v_cache.data + (size_t)p * kv_row_size + kv_h * head_dim;
+                float w = scores[p];
+                for (int d = 0; d < head_dim; ++d) {
+                    out_head[d] += w * v_cached[d];
+                }
+            }
+        }
+
+        // 6. Output gate (same condition/formula as the single-position path).
+        if (q_head_dim > head_dim) {
+            for (int h = 0; h < num_heads; ++h) {
+                float* out_head = out_row + h * head_dim;
+                float* gate_head = q_row + h * q_head_dim + head_dim;
+                for (int d = 0; d < head_dim; ++d) {
+                    float g = gate_head[d];
+                    out_head[d] *= 1.0f / (1.0f + std::exp(-g));
+                }
+            }
+        }
+    }
+
+    // 7. Output projection for all K rows in one batched matmul call.
+    // matmul() only reads A.shape.back() as the contraction dim, so a 3D
+    // [K, num_heads, head_dim] tensor must be flattened to 2D first (same
+    // reason the single-position path above builds attn_out_flat).
+    Tensor attn_out_flat({K, num_heads * head_dim}, attn_out.data);
+    math::matmul(attn_out_flat, o_proj, output, true);
+}
+
 void Qwen3_5Attention::reset_states() {
     std::memset(k_cache.data, 0, k_cache.size() * sizeof(float));
     std::memset(v_cache.data, 0, v_cache.size() * sizeof(float));
@@ -210,7 +374,10 @@ void Qwen3_5GatedDeltaNet::init(
 }
 
 void Qwen3_5GatedDeltaNet::forward(const Tensor& input, Tensor& output, Context& ctx) {
-    (void)ctx;
+    if (ctx.seq_len > 1) {
+        forward_chunk(input, output, ctx);
+        return;
+    }
     // input shape: [hidden_size] (rank 1)
 
     // 1. Projections — qkv, z, b, a all read the same input; batch them under one
@@ -388,6 +555,181 @@ void Qwen3_5GatedDeltaNet::forward(const Tensor& input, Tensor& output, Context&
     // 10. Output projection
     Tensor attn_flat({1, hidden_size}, attn_out.data);
     math::matmul(attn_flat, out_proj, output, true);
+}
+
+// Batched/chunked path used when ctx.seq_len > 1. The four input projections
+// (qkv/z/b/a) batch across all K rows in one matmul call each — each weight
+// matrix is read once instead of once per row. The causal conv1d state and
+// the recurrent delta-rule state are genuine sequential recurrences (each
+// row's update depends on the previous row's state), so those stay the
+// existing single-step primitives, called once per row IN POSITION ORDER —
+// identical math to the single-position path, just invoked K times instead
+// of relying on K separate forward() calls to supply the row loop.
+void Qwen3_5GatedDeltaNet::forward_chunk(const Tensor& input, Tensor& output, Context& ctx) {
+    int K = ctx.seq_len;
+
+    // 1. Batched projections for all K rows.
+    Tensor qkv({K, 3 * hidden_size});
+    Tensor z({K, hidden_size});
+    Tensor b_raw({K, num_heads});
+    Tensor a_raw({K, num_heads});
+    math::matmul(input, in_proj_qkv, qkv, true);
+    math::matmul(input, in_proj_z, z, true);
+    math::matmul(input, in_proj_b, b_raw, true);
+    math::matmul(input, in_proj_a, a_raw, true);
+
+    Tensor attn_out({K, num_heads, head_dim});
+    float q_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    for (int r = 0; r < K; ++r) {
+        float* qkv_row = qkv.data + (size_t)r * 3 * hidden_size;
+        float* b_row = b_raw.data + (size_t)r * num_heads;
+        float* a_row = a_raw.data + (size_t)r * num_heads;
+        float* out_row = attn_out.data + (size_t)r * num_heads * head_dim;
+
+        // 2. Causal depthwise conv1d state update — one sequential step.
+        Tensor qkv_row_view({3 * hidden_size}, qkv_row);
+        Tensor qkv_conv({3 * hidden_size});
+        math::causal_conv1d_update(qkv_row_view, conv_state, conv1d_weight, qkv_conv);
+
+        // 3. Split into q, k, v — each [num_heads, head_dim].
+        float* q_ptr = qkv_conv.data;
+        float* k_ptr = qkv_conv.data + hidden_size;
+        float* v_ptr = qkv_conv.data + 2 * hidden_size;
+
+        // 4. SiLU on the full post-conv q,k,v.
+        for (int i = 0; i < 3 * hidden_size; ++i) {
+            float x = qkv_conv.data[i];
+            qkv_conv.data[i] = x / (1.0f + std::exp(-x));
+        }
+
+        // 5. L2-norm per head on q and k.
+        for (int h = 0; h < num_heads; ++h) {
+            float* q_h = q_ptr + h * head_dim;
+            float* k_h = k_ptr + h * head_dim;
+
+            float qn = 0.0f, kn = 0.0f;
+            for (int i = 0; i < head_dim; ++i) {
+                qn += q_h[i] * q_h[i];
+                kn += k_h[i] * k_h[i];
+            }
+            qn = std::sqrt(qn + 1e-6f);
+            kn = std::sqrt(kn + 1e-6f);
+            for (int i = 0; i < head_dim; ++i) {
+                q_h[i] /= qn;
+                k_h[i] /= kn;
+            }
+        }
+
+        // 6. Per-head decay (alpha) and write gate (beta).
+        std::vector<float> decay(num_heads);
+        std::vector<float> write(num_heads);
+        for (int h = 0; h < num_heads; ++h) {
+            float dt_in = a_row[h] + dt_bias.data[h];
+            float sp = (dt_in > 20.0f) ? dt_in : std::log1p(std::exp(dt_in));
+            float alpha_h = -std::exp(A_log.data[h]) * sp;
+            decay[h] = std::exp(alpha_h);
+            write[h] = 1.0f / (1.0f + std::exp(-b_row[h]));
+        }
+
+        // 7. Gated Delta Rule recurrent state update + output — one
+        // sequential step, mutates recurrent_state in place (same AVX2
+        // kernel as the single-position path).
+        for (int h = 0; h < num_heads; ++h) {
+            float* state_h = recurrent_state.data + h * head_dim * head_dim;
+            const float* q_h = q_ptr + h * head_dim;
+            const float* k_h = k_ptr + h * head_dim;
+            const float* v_h = v_ptr + h * head_dim;
+            float* out_h = out_row + h * head_dim;
+
+            float dec = decay[h];
+            float beta = write[h];
+
+            std::vector<float> kv_mem(head_dim, 0.0f);
+            {
+                __m256 vdec = _mm256_set1_ps(dec);
+                for (int i = 0; i < head_dim; ++i) {
+                    float* row = state_h + i * head_dim;
+                    __m256 vk = _mm256_set1_ps(k_h[i]);
+                    int j = 0;
+                    for (; j + 8 <= head_dim; j += 8) {
+                        __m256 rr = _mm256_mul_ps(_mm256_loadu_ps(row + j), vdec);
+                        _mm256_storeu_ps(row + j, rr);
+                        __m256 acc = _mm256_loadu_ps(kv_mem.data() + j);
+                        acc = _mm256_fmadd_ps(vk, rr, acc);
+                        _mm256_storeu_ps(kv_mem.data() + j, acc);
+                    }
+                    for (; j < head_dim; ++j) {
+                        row[j] *= dec;
+                        kv_mem[j] += k_h[i] * row[j];
+                    }
+                }
+            }
+
+            {
+                std::vector<float> delta(head_dim);
+                for (int j = 0; j < head_dim; ++j) delta[j] = v_h[j] - kv_mem[j];
+                for (int i = 0; i < head_dim; ++i) {
+                    float s = beta * k_h[i];
+                    __m256 vs = _mm256_set1_ps(s);
+                    float* row = state_h + i * head_dim;
+                    int j = 0;
+                    for (; j + 8 <= head_dim; j += 8) {
+                        __m256 rr = _mm256_fmadd_ps(vs, _mm256_loadu_ps(delta.data() + j),
+                                                    _mm256_loadu_ps(row + j));
+                        _mm256_storeu_ps(row + j, rr);
+                    }
+                    for (; j < head_dim; ++j) row[j] += s * delta[j];
+                }
+            }
+
+            {
+                for (int j = 0; j < head_dim; ++j) out_h[j] = 0.0f;
+                for (int i = 0; i < head_dim; ++i) {
+                    __m256 vq = _mm256_set1_ps(q_h[i]);
+                    const float* row = state_h + i * head_dim;
+                    int j = 0;
+                    for (; j + 8 <= head_dim; j += 8) {
+                        __m256 acc = _mm256_fmadd_ps(vq, _mm256_loadu_ps(row + j),
+                                                     _mm256_loadu_ps(out_h + j));
+                        _mm256_storeu_ps(out_h + j, acc);
+                    }
+                    for (; j < head_dim; ++j) out_h[j] += q_h[i] * row[j];
+                }
+                __m256 vqs = _mm256_set1_ps(q_scale);
+                int j = 0;
+                for (; j + 8 <= head_dim; j += 8) {
+                    _mm256_storeu_ps(out_h + j, _mm256_mul_ps(_mm256_loadu_ps(out_h + j), vqs));
+                }
+                for (; j < head_dim; ++j) out_h[j] *= q_scale;
+            }
+        }
+
+        // 8. Head-wise RMSNorm.
+        for (int h = 0; h < num_heads; ++h) {
+            float* out_h = out_row + h * head_dim;
+            float ss = 0.0f;
+            for (int i = 0; i < head_dim; ++i) ss += out_h[i] * out_h[i];
+            float scale = 1.0f / std::sqrt((ss / head_dim) + 1e-6f);
+            for (int i = 0; i < head_dim; ++i) {
+                out_h[i] = out_h[i] * scale * norm_weight.data[i];
+            }
+        }
+
+        // 9. Output gate: element-wise multiply by SiLU(z) for this row.
+        float* z_row = z.data + (size_t)r * hidden_size;
+        for (int i = 0; i < hidden_size; ++i) {
+            float zv = z_row[i];
+            out_row[i] *= zv / (1.0f + std::exp(-zv));
+        }
+    }
+
+    // 10. Output projection for all K rows in one batched matmul call.
+    // matmul() only reads A.shape.back() as the contraction dim, so the 3D
+    // [K, num_heads, head_dim] tensor must be flattened to 2D first (same
+    // reason the single-position path above builds attn_flat).
+    Tensor attn_out_flat({K, num_heads * head_dim}, attn_out.data);
+    math::matmul(attn_out_flat, out_proj, output, true);
 }
 
 void Qwen3_5GatedDeltaNet::reset_states() {

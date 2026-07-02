@@ -21,6 +21,11 @@ public:
     void prefetch_weights() const override;
 
 private:
+    // Batched/chunked path used when ctx.seq_len > 1 (see definition in
+    // attention.cpp for why this is bit-identical to the single-position
+    // path called seq_len times).
+    void forward_chunk(const Tensor& input, Tensor& output, Context& ctx);
+
     Tensor q_proj;
     Tensor k_proj;
     Tensor v_proj;
@@ -62,6 +67,13 @@ public:
     void prefetch_weights() const override;
 
 private:
+    // Batched/chunked path used when ctx.seq_len > 1. The projections batch
+    // across rows (weight read once); the causal conv1d and recurrent
+    // delta-rule updates stay the existing single-step primitives, called
+    // once per row IN POSITION ORDER, since both are genuine sequential
+    // recurrences (each row's update depends on the previous row's state).
+    void forward_chunk(const Tensor& input, Tensor& output, Context& ctx);
+
     Tensor in_proj_qkv;
     Tensor in_proj_z;
     Tensor in_proj_b;

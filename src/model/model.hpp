@@ -45,6 +45,17 @@ public:
     // Writes the vocabulary logits to the provided output tensor.
     void forward(int token_id, Tensor& logits, Context& ctx);
 
+    // Batched/chunked forward: processes all of token_ids in one pass,
+    // covering absolute positions ctx.pos .. ctx.pos+token_ids.size()-1.
+    // Writes [token_ids.size(), vocab_size] logits (one row per position) to
+    // logits_out. Computes EXACTLY the same result as calling forward() once
+    // per token in order (see attention.cpp's forward_chunk for why), just
+    // with each layer's weights read once for the whole chunk instead of
+    // once per token — the prerequisite for verifying a speculative-decoding
+    // draft chunk against this model in one pass. ctx.pos is left unchanged;
+    // ctx.seq_len is reset to 1 on return.
+    void forward_batch(const std::vector<int>& token_ids, Tensor& logits_out, Context& ctx);
+
     // Greedy sampling with temperature and top-k filtering.
     // Runs on the final logits tensor.
     int sample(const Tensor& logits, float temperature, int top_k);
