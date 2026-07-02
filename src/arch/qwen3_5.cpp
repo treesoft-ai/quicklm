@@ -154,6 +154,16 @@ std::string Qwen3_5Architecture::default_chat_template() const {
     // turn primed with an empty <think></think> block. Used only when the model dir
     // exposes no chat_template.jinja the renderer can handle. Tags are adjacent so
     // only the string literals are emitted (no incidental whitespace).
+    //
+    // The assistant branch re-emits the same "<think>\n\n</think>\n\n" priming that
+    // add_generation_prompt inserted when that turn was generated, instead of just
+    // '<|im_start|>assistant\n' + content. Those priming tokens are physically part
+    // of what got forwarded into the KV-cache/DeltaNet state for that turn, so a
+    // history render that omits them is guaranteed to diverge from the live cache
+    // right after the prior turn ends (--optimize kv-reuse would reset every turn).
+    // Reproducing them here makes a later turn's render a true superset of the
+    // earlier turn's cached tokens, so kv-reuse can actually extend the cache
+    // instead of only ever falling back.
     return
         "{%- for message in messages %}"
         "{%- if message.role == 'system' %}"
@@ -161,7 +171,7 @@ std::string Qwen3_5Architecture::default_chat_template() const {
         "{%- elif message.role == 'user' %}"
         "{{- '<|im_start|>user\n' + message.content + '<|im_end|>\n' }}"
         "{%- elif message.role == 'assistant' %}"
-        "{{- '<|im_start|>assistant\n' + message.content + '<|im_end|>\n' }}"
+        "{{- '<|im_start|>assistant\n<think>\n\n</think>\n\n' + message.content + '<|im_end|>\n' }}"
         "{%- endif %}"
         "{%- endfor %}"
         "{%- if add_generation_prompt %}"
