@@ -20,8 +20,8 @@ void print_usage() {
               << "  --max_tokens <value>  Maximum output tokens to generate (default: 256)\n"
               << "  --threads <value>     Number of threads (default: hardware threads)\n"
               << "  --optimize <list>     Comma-separated optimization methods (default: speculative)\n"
-              << "                        [PLACEHOLDER except 'prefetch': the others are reserved\n"
-              << "                         for future use and do not currently affect inference]\n"
+              << "                        [PLACEHOLDER except 'prefetch'/'fusion': the others are\n"
+              << "                         reserved for future use and do not currently affect inference]\n"
               << "                        Speculation & decoding:\n"
               << "                          speculative    Speculative decoding (needs --draft-model)\n"
               << "                        Memory / KV:\n"
@@ -29,7 +29,9 @@ void print_usage() {
               << "                          paged-kv       Paged attention for KV memory management\n"
               << "                        Attention & kernels:\n"
               << "                          flash-attn     Fused attention kernel\n"
-              << "                          fusion         Kernel fusion (fewer launches)\n"
+              << "                          fusion         Fuse adjacent elementwise passes (SiLU+mul,\n"
+              << "                                         residual-add+RMSNorm) to cut memory traffic\n"
+              << "                                         (lossless)\n"
               << "                          cuda-graphs    Capture decode loop as CUDA graph\n"
               << "                        Memory movement:\n"
               << "                          prefetch       Warm next layer's weights while the\n"
@@ -132,7 +134,7 @@ int main(int argc, char* argv[]) {
         if (i > 0) std::cout << ", ";
         std::cout << optimizations[i];
     }
-    std::cout << " (all except 'prefetch' are placeholders) using " << num_threads << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
+    std::cout << " (all except 'prefetch'/'fusion' are placeholders) using " << num_threads << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
     math::init_thread_pool(num_threads);
 
     // 1. Initialize tokenizer
@@ -155,6 +157,8 @@ int main(int argc, char* argv[]) {
     }
     model.set_prefetch_enabled(
         std::find(optimizations.begin(), optimizations.end(), "prefetch") != optimizations.end());
+    model.set_fusion_enabled(
+        std::find(optimizations.begin(), optimizations.end(), "fusion") != optimizations.end());
     auto end_load = std::chrono::high_resolution_clock::now();
     std::chrono::duration<float> load_duration = end_load - start_load;
     std::cout << "Model loaded successfully in " << load_duration.count() << " seconds." << std::endl;

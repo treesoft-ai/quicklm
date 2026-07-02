@@ -33,6 +33,14 @@ public:
     // latency hiding); off by default until requested via --optimize.
     void set_prefetch_enabled(bool enabled) { prefetch_enabled = enabled; }
 
+    // Gate the QI --optimize=fusion method: merge adjacent elementwise passes
+    // (SiLU+multiply, residual-add+RMSNorm) into single loops per layer.
+    // Lossless (same math, pure memory-traffic reduction); off by default
+    // until requested via --optimize.
+    void set_fusion_enabled(bool enabled) {
+        for (auto& layer : layers) layer->set_fusion_enabled(enabled);
+    }
+
     // Run forward pass for a single token ID at position pos.
     // Writes the vocabulary logits to the provided output tensor.
     void forward(int token_id, Tensor& logits, Context& ctx);

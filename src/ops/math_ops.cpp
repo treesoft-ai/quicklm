@@ -918,6 +918,49 @@ void scale(Tensor& A, float s) {
     }
 }
 
+// --- Fused SiLU + elementwise multiply ---
+
+void silu_mul(Tensor& A, const Tensor& B) {
+    int len = A.size();
+    for (int i = 0; i < len; ++i) {
+        float x = A.data[i];
+        float silu_x = x / (1.0f + std::exp(-x));
+        A.data[i] = silu_x * B.data[i];
+    }
+}
+
+// --- Fused residual add + RMSNorm ---
+
+void add_rms_norm(Tensor& residual, const Tensor& delta, const Tensor& weight,
+                   Tensor& output, float eps) {
+    // residual/delta/output shape: [size] or [seq_len, size]
+    // weight shape: [size]
+    int size = weight.shape[0];
+    int num_rows = residual.size() / size;
+
+    for (int r = 0; r < num_rows; ++r) {
+        float* res_row = residual.data + r * size;
+        const float* delta_row = delta.data + r * size;
+        float* out_row = output.data + r * size;
+
+        // Fused pass: add the residual and accumulate sum-of-squares in one
+        // sweep, instead of writing res_row then re-reading it for rms_norm.
+        float ss = 0.0f;
+        for (int i = 0; i < size; ++i) {
+            float v = res_row[i] + delta_row[i];
+            res_row[i] = v;
+            ss += v * v;
+        }
+        float s = 1.0f / std::sqrt((ss / size) + eps);
+
+        // Normalize and scale by (1 + weight), same zero-centered convention
+        // as rms_norm().
+        for (int i = 0; i < size; ++i) {
+            out_row[i] = res_row[i] * s * (1.0f + weight.data[i]);
+        }
+    }
+}
+
 // --- Softmax ---
 
 void softmax(Tensor& logits) {

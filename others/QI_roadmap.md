@@ -1,7 +1,7 @@
 QI --optimize methods (all lossless, no INT4/8)
 =================================================
-Status: prefetch is implemented; the rest are placeholders (parsed/validated
-by the CLI but have no effect on inference yet).
+Status: prefetch and fusion are implemented; the rest are placeholders
+(parsed/validated by the CLI but have no effect on inference yet).
 
 
 speculative     [needs --draft-model]
@@ -30,10 +30,18 @@ flash-attn
   SRAM, so it moves far fewer bytes. Identical math, less memory traffic —
   a true free lunch. Especially helps long context.
 
-fusion
-  Merges several small ops (e.g. add + norm + activation) into one kernel.
-  Fewer kernel launches and fewer round-trips of intermediate tensors to
-  global memory. Same results, less overhead.
+fusion          [IMPLEMENTED]
+  Merges several small elementwise ops into one loop so intermediate values
+  stay in registers instead of round-tripping through memory. Same results,
+  less memory traffic. Implemented as two fused kernels: silu_mul (SiLU +
+  elementwise-multiply in the SwiGLU MLP) and add_rms_norm (residual-add +
+  RMSNorm before the MLP block). Verified bit-for-bit lossless (identical
+  greedy token IDs with the flag on vs. off). NOTE: measured effect on
+  tokens/sec is negligible on this model/hardware — decode is bound by
+  weight-matmul memory traffic (hundreds of MB/token), and the elementwise
+  buffers fusion touches are only a few KB/token, several orders of
+  magnitude smaller. Kept for correctness/cleanliness and as a building
+  block, not as a throughput win.
 
 cuda-graphs
   Captures the repetitive decode loop as a single CUDA graph and replays
@@ -48,5 +56,5 @@ prefetch        [IMPLEMENTED]
   weight tensor of the NEXT layer (attention Q/K/V, or the fused QKV
   projection for Gated DeltaNet layers) while it is still computing itself.
   Verified bit-for-bit lossless (identical greedy token IDs with the flag
-  on vs. off). All other methods below remain placeholders.
+  on vs. off). All other methods remain placeholders.
 =================================================

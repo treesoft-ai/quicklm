@@ -85,6 +85,19 @@ void elementwise_add(Tensor& A, const Tensor& B);
 // In-place element-wise scale: A = A * scale
 void scale(Tensor& A, float s);
 
+// Fused: A[i] = silu(A[i]) * B[i]. Same arithmetic as calling silu(A, A)
+// followed by elementwise_mul(A, B), but the SiLU result stays in a register
+// instead of round-tripping through memory between the two steps.
+void silu_mul(Tensor& A, const Tensor& B);
+
+// Fused: residual[i] += delta[i], then RMSNorm(residual) written to output.
+// Same arithmetic as elementwise_add(residual, delta) followed by
+// rms_norm(residual, weight, output, eps), but residual's post-add
+// sum-of-squares is accumulated in the same pass as the add instead of
+// re-reading residual from memory afterward.
+void add_rms_norm(Tensor& residual, const Tensor& delta, const Tensor& weight,
+                   Tensor& output, float eps);
+
 // Softmax operation along the last dimension
 void softmax(Tensor& logits);
 

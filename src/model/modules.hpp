@@ -25,12 +25,29 @@ public:
     // layer's first weight rows into cache before they're actually needed.
     // Pure latency hiding — default no-op for modules with negligible weights.
     virtual void prefetch_weights() const {}
+
+    // Toggle the QI --optimize=fusion method: merge adjacent elementwise
+    // passes (e.g. SiLU+multiply, residual-add+RMSNorm) into a single loop so
+    // intermediate values stay in registers instead of round-tripping through
+    // memory. Same math, same rounding — pure memory-traffic reduction.
+    // Default no-op for modules with no fusable elementwise ops.
+    virtual void set_fusion_enabled(bool) {}
 };
 
 // Abstract interface for Normalization layers
 class INormalization : public IModule {
 public:
     virtual ~INormalization() = default;
+
+    // Fused residual-add + normalize: residual[i] += delta[i], then normalize
+    // the updated residual into output. Default falls back to a plain add
+    // followed by forward(); concrete normalizations that can genuinely fuse
+    // the two passes (e.g. RMSNorm) override this.
+    virtual void forward_fused_add(Tensor& residual, const Tensor& delta,
+                                    Tensor& output, Context& ctx) {
+        math::elementwise_add(residual, delta);
+        forward(residual, output, ctx);
+    }
 };
 
 // Abstract interface for Attention mechanisms
@@ -59,6 +76,12 @@ public:
     void forward(const Tensor& input, Tensor& output, Context& ctx) override {
         (void)ctx;
         math::rms_norm(input, weight, output, eps);
+    }
+
+    void forward_fused_add(Tensor& residual, const Tensor& delta,
+                            Tensor& output, Context& ctx) override {
+        (void)ctx;
+        math::add_rms_norm(residual, delta, weight, output, eps);
     }
 
 private:
@@ -98,11 +121,16 @@ public:
             math::matmul(input, up_proj, up_out, true);
         }
 
-        // 2. SiLU activation on gate projection
-        math::silu(gate_out, gate_out);
-
-        // 4. Elementwise product: gate_out = SiLU(GateProj(x)) * UpProj(x)
-        math::elementwise_mul(gate_out, up_out);
+        // 2+4. SiLU(GateProj(x)) * UpProj(x). Fused into one pass over
+        // gate_out when --optimize fusion is on: the SiLU result never
+        // leaves a register before being multiplied, instead of writing
+        // gate_out then immediately reading it back for the multiply.
+        if (fusion_enabled) {
+            math::silu_mul(gate_out, up_out);
+        } else {
+            math::silu(gate_out, gate_out);
+            math::elementwise_mul(gate_out, up_out);
+        }
 
         // 5. Down projection: output = DownProj( gate_out )
         math::matmul(gate_out, down_proj, output, true);
@@ -116,10 +144,13 @@ public:
         math::prefetch_weight_head(down_proj, 4);
     }
 
+    void set_fusion_enabled(bool enabled) override { fusion_enabled = enabled; }
+
 private:
     Tensor gate_proj;
     Tensor up_proj;
     Tensor down_proj;
+    bool fusion_enabled = false;
 };
 
 // Concrete implementation of a DecoderLayer linking Normalization, Attention, and MLP
@@ -153,12 +184,18 @@ public:
         Tensor attn_out(input.shape);
         attn->forward(norm1_out, attn_out, ctx);
 
-        // Residual: output = output + attn_out
-        math::elementwise_add(output, attn_out);
-
         // --- MLP block ---
         Tensor norm2_out(input.shape);
-        norm2->forward(output, norm2_out, ctx);
+        if (fusion_enabled) {
+            // Fused: output += attn_out, then RMSNorm(output) -> norm2_out,
+            // in one pass instead of a separate add followed by a full
+            // re-read of output inside norm2->forward().
+            norm2->forward_fused_add(output, attn_out, norm2_out, ctx);
+        } else {
+            // Residual: output = output + attn_out
+            math::elementwise_add(output, attn_out);
+            norm2->forward(output, norm2_out, ctx);
+        }
 
         Tensor mlp_out(input.shape);
         mlp->forward(norm2_out, mlp_out, ctx);
@@ -181,9 +218,16 @@ public:
         if (attn) attn->prefetch_weights();
     }
 
+    void set_fusion_enabled(bool enabled) override {
+        fusion_enabled = enabled;
+        if (norm2) norm2->set_fusion_enabled(enabled);
+        if (mlp) mlp->set_fusion_enabled(enabled);
+    }
+
 private:
     std::shared_ptr<INormalization> norm1 = nullptr;
     std::shared_ptr<IAttention> attn = nullptr;
     std::shared_ptr<INormalization> norm2 = nullptr;
     std::shared_ptr<IMLP> mlp = nullptr;
+    bool fusion_enabled = false;
 };
