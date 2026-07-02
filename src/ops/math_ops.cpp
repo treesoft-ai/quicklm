@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <chrono>
 #include <atomic>
+#include <algorithm>
 #include <immintrin.h>
 
 // --- ThreadPool Implementation ---
@@ -823,6 +824,35 @@ void matmul_batched(const std::vector<const Tensor*>& As,
     }
 }
 
+// --- Cross-layer weight prefetch ---
+
+void prefetch_weight_head(const Tensor& t, int num_lines) {
+    constexpr int LINE = 64;  // bytes per cache line
+
+    const char* base = nullptr;
+    long long byte_len = 0;
+
+    if (t.is_bf16()) {
+        base = reinterpret_cast<const char*>(t.bf16_data);
+        byte_len = (long long)t.size() * sizeof(uint16_t);
+    } else if (t.is_int8()) {
+        base = reinterpret_cast<const char*>(t.int8_data);
+        byte_len = (long long)t.size();
+    } else if (t.is_int4()) {
+        base = reinterpret_cast<const char*>(t.int4_data);
+        byte_len = ((long long)t.size() + 1) / 2;
+    } else if (t.data) {
+        base = reinterpret_cast<const char*>(t.data);
+        byte_len = (long long)t.size() * sizeof(float);
+    }
+    if (!base || byte_len <= 0) return;
+
+    long long max_lines = (byte_len + LINE - 1) / LINE;
+    int lines = (int)std::min<long long>(num_lines, max_lines);
+    for (int i = 0; i < lines; ++i) {
+        _mm_prefetch(base + (size_t)i * LINE, _MM_HINT_T1);
+    }
+}
 
 // --- RMSNorm ---
 

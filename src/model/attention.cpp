@@ -171,6 +171,13 @@ void Qwen3_5Attention::reset_states() {
     std::memset(v_cache.data, 0, v_cache.size() * sizeof(float));
 }
 
+void Qwen3_5Attention::prefetch_weights() const {
+    // q/k/v projections are read first (and concurrently, via matmul_batched).
+    math::prefetch_weight_head(q_proj);
+    math::prefetch_weight_head(k_proj);
+    math::prefetch_weight_head(v_proj);
+}
+
 // --- Qwen3_5GatedDeltaNet (Linear Attention) Implementation ---
 
 void Qwen3_5GatedDeltaNet::init(
@@ -386,4 +393,10 @@ void Qwen3_5GatedDeltaNet::forward(const Tensor& input, Tensor& output, Context&
 void Qwen3_5GatedDeltaNet::reset_states() {
     std::memset(conv_state.data, 0, conv_state.size() * sizeof(float));
     std::memset(recurrent_state.data, 0, recurrent_state.size() * sizeof(float));
+}
+
+void Qwen3_5GatedDeltaNet::prefetch_weights() const {
+    // in_proj_qkv is the largest and first-read projection (z/b/a follow under
+    // the same matmul_batched barrier but are much smaller).
+    math::prefetch_weight_head(in_proj_qkv);
 }

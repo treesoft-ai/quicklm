@@ -155,6 +155,13 @@ void DecoderModel::forward(int token_id, Tensor& logits, Context& ctx) {
     // Execute transformer layers
     Tensor next_hidden_states({config.hidden_size});
     for (size_t i = 0; i < layers.size(); ++i) {
+        // Warm layer i+1's first weight matrix while layer i is still computing,
+        // so there's no cold-cache stall the moment layer i+1 starts (pure
+        // latency hiding via software prefetch; does not touch any value).
+        if (prefetch_enabled && i + 1 < layers.size()) {
+            layers[i + 1]->prefetch_weights();
+        }
+
         auto start_layer = std::chrono::high_resolution_clock::now();
         layers[i]->forward(hidden_states, next_hidden_states, ctx);
         std::swap(hidden_states.data, next_hidden_states.data);

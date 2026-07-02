@@ -19,9 +19,9 @@ void print_usage() {
               << "  --top_k <value>       Top-k filtering (default: 40, 0 to disable)\n"
               << "  --max_tokens <value>  Maximum output tokens to generate (default: 256)\n"
               << "  --threads <value>     Number of threads (default: hardware threads)\n"
-              << "  --optimize <list>     Comma-separated optimization methods (default: balanced)\n"
-              << "                        [PLACEHOLDER: These are reserved for future use and do not\n"
-              << "                         currently affect inference]\n"
+              << "  --optimize <list>     Comma-separated optimization methods (default: speculative)\n"
+              << "                        [PLACEHOLDER except 'prefetch': the others are reserved\n"
+              << "                         for future use and do not currently affect inference]\n"
               << "                        Speculation & decoding:\n"
               << "                          speculative    Speculative decoding (needs --draft-model)\n"
               << "                        Memory / KV:\n"
@@ -32,7 +32,8 @@ void print_usage() {
               << "                          fusion         Kernel fusion (fewer launches)\n"
               << "                          cuda-graphs    Capture decode loop as CUDA graph\n"
               << "                        Memory movement:\n"
-              << "                          prefetch       Weight prefetch/streaming\n"
+              << "                          prefetch       Warm next layer's weights while the\n"
+              << "                                         current layer computes (lossless)\n"
               << "  --raw                 Disable the chat template (plain completion mode)\n"
               << "  --show_ids            Print generated token IDs to stderr (verification)\n"
               << "  --precision <value>   Weight precision: bf16 (default), int8, or int4\n"
@@ -48,7 +49,7 @@ int main(int argc, char* argv[]) {
     int top_k = 40;
     int max_tokens = 256;
     int num_threads = std::max(1u, std::thread::hardware_concurrency());
-    std::string optimize = "balanced";
+    std::string optimize;  // empty -> falls back to "speculative" below
     bool raw = false;  // --raw disables the chat template (plain completion mode)
     bool show_ids = false;  // --show_ids prints generated token IDs to stderr (verification)
     std::string precision = "bf16";  // --precision bf16|int8|int4
@@ -131,7 +132,7 @@ int main(int argc, char* argv[]) {
         if (i > 0) std::cout << ", ";
         std::cout << optimizations[i];
     }
-    std::cout << " (placeholder; does not affect inference) using " << num_threads << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
+    std::cout << " (all except 'prefetch' are placeholders) using " << num_threads << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
     math::init_thread_pool(num_threads);
 
     // 1. Initialize tokenizer
@@ -152,6 +153,8 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: Failed to load model weights/configuration from: " << model_path << std::endl;
         return 1;
     }
+    model.set_prefetch_enabled(
+        std::find(optimizations.begin(), optimizations.end(), "prefetch") != optimizations.end());
     auto end_load = std::chrono::high_resolution_clock::now();
     std::chrono::duration<float> load_duration = end_load - start_load;
     std::cout << "Model loaded successfully in " << load_duration.count() << " seconds." << std::endl;

@@ -18,6 +18,13 @@ public:
     virtual ~IModule() = default;
     virtual void forward(const Tensor& input, Tensor& output, Context& ctx) = 0;
     virtual void reset_states() {}
+
+    // Issue prefetch hints for this module's first-touched weight tensor(s).
+    // Called on the NEXT layer while the current layer is still computing, so
+    // the hardware has a full layer's worth of compute time to pull the next
+    // layer's first weight rows into cache before they're actually needed.
+    // Pure latency hiding — default no-op for modules with negligible weights.
+    virtual void prefetch_weights() const {}
 };
 
 // Abstract interface for Normalization layers
@@ -101,6 +108,14 @@ public:
         math::matmul(gate_out, down_proj, output, true);
     }
 
+    void prefetch_weights() const override {
+        // gate_proj/up_proj are read first (and concurrently); down_proj isn't
+        // needed until after SiLU+mul, so it gets fewer lines.
+        math::prefetch_weight_head(gate_proj);
+        math::prefetch_weight_head(up_proj);
+        math::prefetch_weight_head(down_proj, 4);
+    }
+
 private:
     Tensor gate_proj;
     Tensor up_proj;
@@ -157,6 +172,13 @@ public:
         if (attn) attn->reset_states();
         if (norm2) norm2->reset_states();
         if (mlp) mlp->reset_states();
+    }
+
+    // Fan out to the sub-module that will actually be touched first
+    // (attention projections); the MLP and norms follow well after attention
+    // in this layer's own forward(), so they don't need advance warming here.
+    void prefetch_weights() const override {
+        if (attn) attn->prefetch_weights();
     }
 
 private:

@@ -112,8 +112,15 @@ void causal_conv1d_update(const Tensor& input, Tensor& conv_state, const Tensor&
 // beta_t shape: [num_heads, key_dim] (write gate)
 // output shape: [num_heads, value_dim]
 void recurrent_gated_delta_rule_update(
-    const Tensor& q, const Tensor& k, const Tensor& v, 
+    const Tensor& q, const Tensor& k, const Tensor& v,
     const Tensor& g, const Tensor& beta, Tensor& state, Tensor& output
 );
+
+// Issue software prefetch hints (L2, non-blocking) for the first `num_lines`
+// cache lines of a weight tensor's active backing store (bf16/int8/int4/fp32,
+// whichever is populated). Pure latency hiding — does not read or alter any
+// value. Intended to warm the next transformer layer's first-touched weight
+// matrix while the current layer is still computing.
+void prefetch_weight_head(const Tensor& t, int num_lines = 8);
 
 } // namespace math

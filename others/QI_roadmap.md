@@ -1,5 +1,8 @@
 QI --optimize methods (all lossless, no INT4/8)
 =================================================
+Status: prefetch is implemented; the rest are placeholders (parsed/validated
+by the CLI but have no effect on inference yet).
+
 
 speculative     [needs --draft-model]
   A small, fast "draft" model proposes several tokens ahead. The full
@@ -37,8 +40,13 @@ cuda-graphs
   it, instead of re-issuing hundreds of individual kernel launches per
   token. Kills CPU-side launch overhead — pure efficiency, zero math change.
 
-prefetch
+prefetch        [IMPLEMENTED]
   Streams/loads the next layer's weights while the current layer is still
   computing, hiding memory latency behind compute. Same weights, just
-  fetched earlier so the pipe never stalls.
+  fetched earlier so the pipe never stalls. Implemented as cross-layer
+  software prefetch (_mm_prefetch, L2 hint): each layer warms the first
+  weight tensor of the NEXT layer (attention Q/K/V, or the fused QKV
+  projection for Gated DeltaNet layers) while it is still computing itself.
+  Verified bit-for-bit lossless (identical greedy token IDs with the flag
+  on vs. off). All other methods below remain placeholders.
 =================================================

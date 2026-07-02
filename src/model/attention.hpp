@@ -18,6 +18,7 @@ public:
 
     void forward(const Tensor& input, Tensor& output, Context& ctx) override;
     void reset_states() override;
+    void prefetch_weights() const override;
 
 private:
     Tensor q_proj;
@@ -58,6 +59,7 @@ public:
 
     void forward(const Tensor& input, Tensor& output, Context& ctx) override;
     void reset_states() override;
+    void prefetch_weights() const override;
 
 private:
     Tensor in_proj_qkv;

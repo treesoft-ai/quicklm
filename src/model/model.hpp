@@ -28,6 +28,11 @@ public:
     // Reset recurrent/KV cache states for a new prompt
     void reset_states();
 
+    // Gate the QI --optimize=prefetch method: warm layer i+1's first weight
+    // matrix while layer i is still computing. Lossless (same math, pure
+    // latency hiding); off by default until requested via --optimize.
+    void set_prefetch_enabled(bool enabled) { prefetch_enabled = enabled; }
+
     // Run forward pass for a single token ID at position pos.
     // Writes the vocabulary logits to the provided output tensor.
     void forward(int token_id, Tensor& logits, Context& ctx);
@@ -53,4 +58,6 @@ private:
 
     // LM Head (converts hidden state back to vocabulary logits)
     Tensor lm_head;
+
+    bool prefetch_enabled = false;
 };
