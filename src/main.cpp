@@ -33,12 +33,6 @@ void print_usage() {
               << "                          cuda-graphs    Capture decode loop as CUDA graph\n"
               << "                        Memory movement:\n"
               << "                          prefetch       Weight prefetch/streaming\n"
-              << "                        Storage:\n"
-              << "                          bf16           Store weights in BF16\n"
-              << "                        Bundles:\n"
-              << "                          latency        Optimized for single-stream (batch=1)\n"
-              << "                          throughput     Optimized for many concurrent streams\n"
-              << "                          balanced       Sensible default mix\n"
               << "  --raw                 Disable the chat template (plain completion mode)\n"
               << "  --show_ids            Print generated token IDs to stderr (verification)\n"
               << "  --precision <value>   Weight precision: bf16 (default), int8, or int4\n"
@@ -93,7 +87,7 @@ int main(int argc, char* argv[]) {
     auto is_valid_optimize = [](const std::string& opt) {
         static const std::set<std::string> valid = {
             "speculative", "kv-reuse", "paged-kv", "flash-attn", "fusion",
-            "cuda-graphs", "prefetch", "bf16", "latency", "throughput", "balanced"
+            "cuda-graphs", "prefetch"
         };
         return valid.count(opt) > 0;
     };
@@ -117,7 +111,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (optimizations.empty()) {
-        optimizations.push_back("balanced");
+        optimizations.push_back("speculative");
     }
 
     if (model_path.empty() || prompt.empty()) {
