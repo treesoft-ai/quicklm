@@ -9,6 +9,8 @@
 #include <chrono>
 #include <algorithm>
 #include <cstdlib>
+#include <sstream>
+#include <set>
 
 void print_usage() {
     std::cout << "Usage: quicklm.exe --path <model_directory> --prompt \"<prompt>\" [options]\n\n"
@@ -17,7 +19,26 @@ void print_usage() {
               << "  --top_k <value>       Top-k filtering (default: 40, 0 to disable)\n"
               << "  --max_tokens <value>  Maximum output tokens to generate (default: 256)\n"
               << "  --threads <value>     Number of threads (default: hardware threads)\n"
-              << "  --version <value>     QI version (default: 1)\n"
+              << "  --optimize <list>     Comma-separated optimization methods (default: balanced)\n"
+              << "                        [PLACEHOLDER: These are reserved for future use and do not\n"
+              << "                         currently affect inference]\n"
+              << "                        Speculation & decoding:\n"
+              << "                          speculative    Speculative decoding (needs --draft-model)\n"
+              << "                        Memory / KV:\n"
+              << "                          kv-reuse       Reuse cached shared prefixes\n"
+              << "                          paged-kv       Paged attention for KV memory management\n"
+              << "                        Attention & kernels:\n"
+              << "                          flash-attn     Fused attention kernel\n"
+              << "                          fusion         Kernel fusion (fewer launches)\n"
+              << "                          cuda-graphs    Capture decode loop as CUDA graph\n"
+              << "                        Memory movement:\n"
+              << "                          prefetch       Weight prefetch/streaming\n"
+              << "                        Storage:\n"
+              << "                          bf16           Store weights in BF16\n"
+              << "                        Bundles:\n"
+              << "                          latency        Optimized for single-stream (batch=1)\n"
+              << "                          throughput     Optimized for many concurrent streams\n"
+              << "                          balanced       Sensible default mix\n"
               << "  --raw                 Disable the chat template (plain completion mode)\n"
               << "  --show_ids            Print generated token IDs to stderr (verification)\n"
               << "  --precision <value>   Weight precision: bf16 (default), int8, or int4\n"
@@ -33,7 +54,7 @@ int main(int argc, char* argv[]) {
     int top_k = 40;
     int max_tokens = 256;
     int num_threads = std::max(1u, std::thread::hardware_concurrency());
-    int qi_version = 1;
+    std::string optimize = "balanced";
     bool raw = false;  // --raw disables the chat template (plain completion mode)
     bool show_ids = false;  // --show_ids prints generated token IDs to stderr (verification)
     std::string precision = "bf16";  // --precision bf16|int8|int4
@@ -53,8 +74,8 @@ int main(int argc, char* argv[]) {
             max_tokens = std::stoi(argv[++i]);
         } else if (arg == "--threads" && i + 1 < argc) {
             num_threads = std::stoi(argv[++i]);
-        } else if (arg == "--version" && i + 1 < argc) {
-            qi_version = std::stoi(argv[++i]);
+        } else if (arg == "--optimize" && i + 1 < argc) {
+            optimize = argv[++i];
         } else if (arg == "--raw") {
             raw = true;
         } else if (arg == "--show_ids") {
@@ -67,8 +88,36 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (qi_version != 1) {
-        std::cerr << "Warning: QI version " << qi_version << " is invalid. Only version 1 is supported." << std::endl;
+    // Validate optimization methods
+    // TODO: Implement actual optimization logic for each method
+    auto is_valid_optimize = [](const std::string& opt) {
+        static const std::set<std::string> valid = {
+            "speculative", "kv-reuse", "paged-kv", "flash-attn", "fusion",
+            "cuda-graphs", "prefetch", "bf16", "latency", "throughput", "balanced"
+        };
+        return valid.count(opt) > 0;
+    };
+
+    // Parse comma-separated optimizations
+    std::vector<std::string> optimizations;
+    std::stringstream ss(optimize);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        // Trim whitespace
+        item.erase(0, item.find_first_not_of(" \t"));
+        item.erase(item.find_last_not_of(" \t") + 1);
+        if (!item.empty()) {
+            if (!is_valid_optimize(item)) {
+                std::cerr << "Error: Unknown optimization method '" << item << "'." << std::endl;
+                print_usage();
+                return 1;
+            }
+            optimizations.push_back(item);
+        }
+    }
+
+    if (optimizations.empty()) {
+        optimizations.push_back("balanced");
     }
 
     if (model_path.empty() || prompt.empty()) {
@@ -83,7 +132,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "Initializing QI v" << qi_version << " (Quick Inference v" << qi_version << ") with " << num_threads << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
+    std::cout << "Initializing QI (Quick Inference) with optimizations: ";
+    for (size_t i = 0; i < optimizations.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        std::cout << optimizations[i];
+    }
+    std::cout << " (placeholder; does not affect inference) using " << num_threads << " thread" << (num_threads != 1 ? "s" : "") << "..." << std::endl;
     math::init_thread_pool(num_threads);
 
     // 1. Initialize tokenizer
