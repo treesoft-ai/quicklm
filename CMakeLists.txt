@@ -28,6 +28,8 @@ set(SOURCES
     src/main.cpp
     src/model/attention.cpp
     src/model/speculative.cpp
+    src/model/scout.cpp
+    src/model/sieve_convert.cpp
 )
 
 # Header files
@@ -44,6 +46,8 @@ set(HEADERS
     src/model/model.hpp
     src/model/attention.hpp
     src/model/speculative.hpp
+    src/model/scout.hpp
+    src/model/sieve_convert.hpp
     src/arch/architecture.hpp
     src/arch/registry.hpp
     src/arch/qwen3_5.hpp

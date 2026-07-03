@@ -4,6 +4,7 @@
 #include "chat_template.hpp"
 #include "registry.hpp"
 #include "math_ops.hpp"
+#include "sieve_convert.hpp"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -77,6 +78,17 @@ void print_usage() {
               << "                        used with --optimize speculative.\n"
               << "  --draft-tokens <K>    Tokens to draft per round before verifying (default: 4).\n"
               << "                        Only used with --optimize speculative.\n\n"
+              << "  --convert-sieve       Offline mode: build Sieve scout tables for --path's\n"
+              << "                        checkpoint (see others/sieve_design.md §4.1) from its\n"
+              << "                        original bf16 weights, written to <path>/sieve_scouts/.\n"
+              << "                        Does not generate text; exits after conversion. This is\n"
+              << "                        the Phase 0 offline step -- no --optimize mode reads\n"
+              << "                        these scout tables yet.\n"
+              << "  --sieve-rank <r>      SVD rank for scout tables (default: 16).\n"
+              << "  --sieve-sketch-bits <b>  Residual sign-sketch width, must be a multiple of 64\n"
+              << "                        (default: 128).\n"
+              << "  --sieve-filter <sub>  Only convert tensors whose name contains this substring\n"
+              << "                        (default: empty, converts every 2D weight matrix).\n\n"
               << "Multi-turn: a single --prompt may contain several turns of the SAME conversation,\n"
               << "delimited by the literal 3-character sequence \\np (backslash, n, p), e.g.\n"
               << "  --prompt \"Hey\\npHow are you?\"\n"
@@ -120,6 +132,10 @@ int main(int argc, char* argv[]) {
     std::string draft_model_path;    // --draft-model; empty -> same as --path (self-speculative)
     std::string draft_precision = "int4";  // --draft-precision bf16|int8|int4
     int draft_tokens = 4;            // --draft-tokens; K drafted per verify round
+    bool convert_sieve = false;      // --convert-sieve: offline scout-table build, then exit
+    int sieve_rank = 16;             // --sieve-rank
+    int sieve_sketch_bits = 128;     // --sieve-sketch-bits
+    std::string sieve_filter;        // --sieve-filter
 
     // Simple command line parsing
     for (int i = 1; i < argc; ++i) {
@@ -152,6 +168,14 @@ int main(int argc, char* argv[]) {
             draft_precision = argv[++i];
         } else if (arg == "--draft-tokens" && i + 1 < argc) {
             draft_tokens = std::stoi(argv[++i]);
+        } else if (arg == "--convert-sieve") {
+            convert_sieve = true;
+        } else if (arg == "--sieve-rank" && i + 1 < argc) {
+            sieve_rank = std::stoi(argv[++i]);
+        } else if (arg == "--sieve-sketch-bits" && i + 1 < argc) {
+            sieve_sketch_bits = std::stoi(argv[++i]);
+        } else if (arg == "--sieve-filter" && i + 1 < argc) {
+            sieve_filter = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             print_usage();
             return 0;
@@ -190,8 +214,32 @@ int main(int argc, char* argv[]) {
         optimizations.push_back("speculative");
     }
 
-    if (model_path.empty() || (prompt.empty() && !interactive)) {
-        std::cerr << "Error: --path is required, and either --prompt or --interactive." << std::endl;
+    if (model_path.empty()) {
+        std::cerr << "Error: --path is required." << std::endl;
+        print_usage();
+        return 1;
+    }
+
+    // --convert-sieve is a standalone offline mode (Sieve Phase 0): build
+    // scout tables and exit, never reaching the generation loop below. Runs
+    // before the --prompt/--interactive requirement since it doesn't
+    // generate text.
+    if (convert_sieve) {
+        if (sieve_sketch_bits <= 0 || sieve_sketch_bits % 64 != 0) {
+            std::cerr << "Error: --sieve-sketch-bits must be a positive multiple of 64, got "
+                      << sieve_sketch_bits << "." << std::endl;
+            return 1;
+        }
+        if (sieve_rank <= 0) {
+            std::cerr << "Error: --sieve-rank must be positive, got " << sieve_rank << "." << std::endl;
+            return 1;
+        }
+        bool ok = run_sieve_convert(model_path, uint32_t(sieve_rank), uint32_t(sieve_sketch_bits), sieve_filter);
+        return ok ? 0 : 1;
+    }
+
+    if (prompt.empty() && !interactive) {
+        std::cerr << "Error: either --prompt or --interactive is required." << std::endl;
         print_usage();
         return 1;
     }
