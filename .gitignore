@@ -15,6 +15,9 @@ models/
 *.exp
 *.lib
 
+# Dev Scripts
+build.bat
+
 # VS Code / Visual Studio directories
 .vs/
 out/
