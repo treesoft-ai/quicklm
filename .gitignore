@@ -1,0 +1,35 @@
+# Build and output directories
+build/
+dist/
+
+# Model checkpoints (large, git-LFS sourced; kept outside dist/ so `make clean`
+# can't delete them — see docs / restore from the model's own remote)
+models/
+
+# Compiler and Linker artifacts
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.lib
+
+# Dev Scripts
+build.bat
+
+# VS Code / Visual Studio directories
+.vs/
+out/
+CMakeSettings.json
+*.user
+.idea/
+.vscode/
+
+# AI Agents
+.claude
+.cursor
+.klat
+CLAUDE.md
+GEMINI.md
+KLAT.md

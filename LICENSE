@@ -1,0 +1,92 @@
+>> TreeSoft Open Source License <<
+Copyright (c) 2026 TreeSoft. All Rights Reserved.
+
+
+1. Acceptance of Terms
+
+By downloading, cloning, accessing, using, or modifying any part of this
+repository — including source code, documentation, or file structure — you
+agree to be bound by the terms of this License.
+
+
+2. Ownership
+
+All original software, source code, and related materials ("Software") remain
+the intellectual property of TreeSoft. This License does not transfer any
+ownership rights to any individual or entity.
+
+
+3. Grant of License
+
+TreeSoft grants you a perpetual, worldwide, royalty-free, non-exclusive license
+to use, copy, modify, and distribute the Software, subject to the conditions
+in Section 4.
+
+
+4. Conditions
+
+a) Attribution
+   Any distribution of the Software or derivative works must retain the
+   original copyright notice in the source code. If the project includes
+   public-facing documentation, TreeSoft must be acknowledged within it.
+   Attribution may be subtle — a name mention is sufficient.
+
+b) Patent Non-Assertion (Scoped)
+   Any patent rights held by TreeSoft that cover this Software apply solely
+   within the context of this codebase. No patent license is granted for
+   use in external, derivative, or proprietary works beyond what is
+   explicitly permitted here.
+
+c) No Warranty Transfer
+   TreeSoft provides no warranty, express or implied, for any derivative
+   or proprietary product built using this Software.
+
+
+5. Permitted Uses
+
+You may:
+
+    · Use the Software for personal, commercial, or proprietary purposes.
+    · Modify the Software and incorporate it into proprietary products.
+    · Distribute the original or modified Software under different terms,
+      provided attribution requirements (Section 4a) are met.
+
+
+6. Contributions
+
+Any contribution submitted to a TreeSoft repository is automatically and
+irrevocably assigned to TreeSoft. Contributors confirm they hold the right
+to submit such contributions and grant TreeSoft perpetual, worldwide,
+royalty-free rights to use, modify, or distribute them in any form.
+
+
+7. Disclaimer of Warranties
+
+The Software is provided "as is", without warranty of any kind, express or
+implied, including but not limited to warranties of merchantability, fitness
+for a particular purpose, or non-infringement.
+
+
+8. Limitation of Liability
+
+To the maximum extent permitted by applicable law, TreeSoft shall not be
+liable for any direct, indirect, incidental, special, or consequential
+damages arising from the use or inability to use the Software.
+
+
+9. Severability
+
+If any provision of this License is found unenforceable, the remaining
+provisions continue in full force and effect.
+
+
+10. Governing Law
+
+This License is governed by the laws of Romania. Any disputes are subject
+to the exclusive jurisdiction of the competent courts of Romania.
+
+
+11. Entire Agreement
+
+This License constitutes the entire agreement between TreeSoft and any
+user of the Software regarding its use and distribution.
